@@ -56,7 +56,7 @@ async def get_data(request: Request, sensor_code, start=NEWEST, end="", _user=De
 # returns card information
 @router.get("/cards")
 @limiter.limit("20/minute")
-async def get_card_data(request: Request, start, end):
+async def get_card_data(request: Request, start, end, _user=Depends(get_current_user_from_session)):
 
     san_start = validateDate(start)
     if san_start == False:

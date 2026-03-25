@@ -6,6 +6,7 @@ from helpers.rate_limit import limiter
 from fastapi import APIRouter, Request, Depends
 from helpers.auth_dependencies import get_current_user_from_session
 from datetime import datetime
+from helpers.names import replace_name
 
 router = APIRouter(prefix="/graphs")
 
@@ -223,6 +224,10 @@ async def get_name(request: Request, sensor_code, _user=Depends(get_current_user
     san_code = validateCode(sensor_code)
     if san_code == False:
         return "enter valid sensor code"
+    
+    name = replace_name(san_code)
+    if name != False:
+        return name
 
     # open connection
     conn = pyodbc.connect(connection_str)
@@ -237,7 +242,7 @@ async def get_name(request: Request, sensor_code, _user=Depends(get_current_user
     curs.execute(query, (san_code,))
     rows = curs.fetchall()
 
-    res = rows[0][2]
+    res = rows[0][2] if rows != [] else "name not found"
     conn.close()
     return res
 
@@ -261,9 +266,13 @@ async def get_codesnames(request: Request, _user=Depends(get_current_user_from_s
 
     res = []
     for row in rows:
+        code = row[0]
+        name = replace_name(code)
+        if name == False:
+            name = row[1]
         res.append({
-            "code": row[0],
-            "name": row[1]
+            "code": code,
+            "name": name
         })
 
     conn.close()

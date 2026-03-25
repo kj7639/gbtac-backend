@@ -1,11 +1,12 @@
+from helpers.auth_dependencies import get_current_user_from_session
+from helpers.names import replace_name
 from routers import *
 from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Request, Depends
 import pyodbc
 import pandas as pd
 import io
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from reportlab.lib.pagesizes import letter, landscape, portrait
+from reportlab.lib.pagesizes import letter, portrait
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/report")
 
 
 @router.get("")
-async def generate_table_report(sensors, start, end, agg= "none", type= "mean"):
+async def generate_table_report(sensors, start, end, agg= "none", type= "mean", title="", _user=Depends(get_current_user_from_session)):
 
     sensor_list = [s.strip() for s in sensors.split(",")]
     san_sensors = []
@@ -67,7 +68,6 @@ async def generate_table_report(sensors, start, end, agg= "none", type= "mean"):
     #query database
     curs.execute(query, (san_start, san_end))
     rows = curs.fetchall()
-    conn.close()
 
     res = []
     for row in rows:
@@ -79,6 +79,25 @@ async def generate_table_report(sensors, start, end, agg= "none", type= "mean"):
         
         res.append(dataset)
         
+    query = f"""
+        SELECT sensor_name_source, sensor_name_report
+        FROM sensor_names
+        WHERE sensor_name_source IN ({', '.join('?' for _ in san_sensors)})
+    """
+
+    curs.execute(query, san_sensors)
+    rows = curs.fetchall()
+
+    name_map = {}
+    for row in rows:
+        name = replace_name(row[0])
+        if name == False:
+            name = row[1]
+        name_map[row[0]] = name
+
+    names = [name_map[sensor] for sensor in san_sensors]
+
+    conn.close()
 
     df = pd.DataFrame(res, columns=["ts"] + san_sensors)
     df["ts"] = pd.to_datetime(df["ts"])
@@ -93,6 +112,12 @@ async def generate_table_report(sensors, start, end, agg= "none", type= "mean"):
             df_agg = df.resample(agg.lower()).sum()
             
         res = df_agg.reset_index()
+    else:
+        res = df
+
+    # title
+    if title == "":
+        title = f"Sensor Data Report, {san_start} to {san_end}"
 
     # pdf and table generation
     buffer = io.BytesIO()
@@ -108,7 +133,7 @@ async def generate_table_report(sensors, start, end, agg= "none", type= "mean"):
     story = []
 
     # Title + date range
-    story.append(Paragraph("Sensor Data Report", styles["Title"]))
+    story.append(Paragraph(title, styles["Title"]))
     story.append(Paragraph(f"{san_start} to {san_end}", styles["Normal"]))
     story.append(Spacer(1, 16))
 
@@ -121,7 +146,7 @@ async def generate_table_report(sensors, start, end, agg= "none", type= "mean"):
         )
 
     # Build table data
-    headers = ["Timestamp"] + san_sensors
+    headers = ["Timestamp"] + names
     table_data = [headers] + display_df.values.tolist()
 
     # Auto-size columns based on page width
