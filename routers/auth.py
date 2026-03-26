@@ -48,6 +48,9 @@ class CreateStaffRequest(BaseModel):
     email: EmailStr
     active: bool
 
+class DeleteStaffRequest(BaseModel):
+    email: EmailStr
+
 # CONFIGURATION
 
 MAX_FAILED_ATTEMPTS = 2  # change to 5 later
@@ -508,3 +511,71 @@ def create_staff(
     except Exception as e:
         print("CREATE STAFF ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
+    
+@router.get("/get-staff")
+def get_staff(admin_user=Depends(require_admin)):
+    try:
+        docs = db.collection("allowedUsers").stream()
+
+        staff_list = []
+
+        for doc in docs:
+            data = doc.to_dict()
+
+            staff_list.append({
+                "email": data.get("email"),
+                "name": f"{data.get('firstName', '')} {data.get('lastName', '')}",
+                "role": data.get("role"),
+                "status": "Active" if data.get("active") else "Inactive",
+            })
+
+        return {
+            "success": True,
+            "staff": staff_list
+        }
+
+    except Exception as e:
+        print("GET STAFF ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/delete-staff")
+def delete_staff(
+    payload: DeleteStaffRequest,
+    admin_user=Depends(require_admin)
+):
+    email = normalize_email(str(payload.email))
+
+    doc_ref = db.collection("allowedUsers").document(email)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Staff not found")
+
+    data = doc.to_dict()
+
+    if admin_user["email"] == email:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+
+    # optional safety check (only delete staff, not admins)
+    if data.get("role") != "staff":
+        raise HTTPException(status_code=403, detail="Only staff accounts can be deleted")
+
+    uid = data.get("uid")
+
+    try:
+        # delete from Firebase Auth
+        if uid:
+            firebase_auth.delete_user(uid)
+
+        # delete from Firestore
+        doc_ref.delete()
+
+        return {
+            "success": True,
+            "message": "Staff account deleted successfully",
+            "email": email
+        }
+
+    except Exception as e:
+        print("DELETE STAFF ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e)) 
