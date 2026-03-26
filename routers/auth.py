@@ -1,5 +1,6 @@
 import os
 import httpx
+import secrets
 
 from helpers.email_service import send_reset_email
 from helpers.firebase_admin_setup import get_firestore_client, get_firebase_auth
@@ -17,7 +18,7 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
 from typing import Optional
-from helpers.auth_dependencies import get_current_user_from_session
+from helpers.auth_dependencies import get_current_user_from_session, require_admin
 
 router = APIRouter(prefix="/auth")
 
@@ -40,6 +41,12 @@ class TokenRequest(BaseModel):
 
 class CaptchaRequest(BaseModel):
     captcha_token: str
+
+class CreateStaffRequest(BaseModel):
+    firstName: str
+    lastName: str
+    email: EmailStr
+    active: bool
 
 # CONFIGURATION
 
@@ -422,4 +429,82 @@ def update_profile(payload: UpdateProfileRequest):
         }
     except Exception as e:
         print("UPDATE PROFILE ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/create-staff")
+def create_staff(
+    payload: CreateStaffRequest,
+    admin_user=Depends(require_admin)
+):
+    email = normalize_email(str(payload.email))
+
+    if not (email.endswith("@sait.ca") or email.endswith("@edu.sait.ca")):
+        raise HTTPException(
+            status_code=400,
+            detail="Email must be a SAIT email (@sait.ca or @edu.sait.ca)"
+        )
+
+    first_name = payload.firstName.strip()
+    last_name = payload.lastName.strip()
+
+    if not first_name or not last_name:
+        raise HTTPException(status_code=400, detail="First name and last name are required")
+
+    doc_ref = db.collection("allowedUsers").document(email)
+    existing_doc = doc_ref.get()
+
+    if existing_doc.exists:
+        raise HTTPException(status_code=409, detail="Staff account already exists")
+
+    try:
+        firebase_auth.get_user_by_email(email)
+        raise HTTPException(status_code=409, detail="A Firebase Auth user with this email already exists")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+
+        error_text = str(e).lower()
+        if "no user record" not in error_text and "user-not-found" not in error_text:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    try:
+        temp_password = secrets.token_urlsafe(12)
+
+        user_record = firebase_auth.create_user(
+            email=email,
+            password=temp_password,
+            display_name=f"{first_name} {last_name}",
+            disabled=not payload.active,
+        )
+
+        staff_data = {
+            "email": email,
+            "firstName": first_name,
+            "lastName": last_name,
+            "role": "staff",
+            "active": payload.active,
+            "uid": user_record.uid,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }
+
+        doc_ref.set(staff_data)
+
+        return {
+            "success": True,
+            "message": "Staff account created successfully",
+            "staff": {
+                "email": email,
+                "firstName": first_name,
+                "lastName": last_name,
+                "role": "staff",
+                "active": payload.active,
+                "uid": user_record.uid,
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("CREATE STAFF ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
