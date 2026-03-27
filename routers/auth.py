@@ -60,11 +60,16 @@ class ConfirmPasswordResetRequest(BaseModel):
     code: str
     newPassword: str
 
+class RefreshSessionRequest(BaseModel):
+    idToken: str
+
 # CONFIGURATION
 
-MAX_FAILED_ATTEMPTS = 2  # change to 5 later
+MAX_FAILED_ATTEMPTS = 5  # change to 5 later
 RESET_COOLDOWN_SECONDS = 60  
-SESSION_EXPIRES_SECONDS = 60 * 60 * 8  # 8 hours fixed session duration for simplicity, can be changed to refresh tokens later
+SESSION_EXPIRES_SECONDS = 60 * 60 * 8   # 8 hours max session lifetime
+IDLE_TIMEOUT_SECONDS = 10 * 60          # 10 minutes of inactivity
+HEARTBEAT_MIN_SECONDS = 60              # allow refresh about once per minute
 RESET_CODE_EXPIRES_MINUTES = 10
 RESET_MAX_VERIFY_ATTEMPTS = 5
 
@@ -101,6 +106,30 @@ def is_valid_password(password: str) -> bool:
         and re.search(r"[0-9]", password)
         and re.search(r"[!@#$%^&*]", password)
     )
+
+def get_session_doc_ref(uid: str):
+    return db.collection("activeSessions").document(uid)
+
+
+def upsert_active_session(uid: str, email: str):
+    now = datetime.now(timezone.utc)
+
+    get_session_doc_ref(uid).set(
+        {
+            "uid": uid,
+            "email": email,
+            "lastActivityAt": now,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+
+def clear_active_session(uid: str):
+    try:
+        get_session_doc_ref(uid).delete()
+    except Exception:
+        pass
 
 # ENDPOINTS
 
@@ -272,6 +301,7 @@ def session_login(payload: TokenRequest, response: Response):
         raise HTTPException(status_code=401, detail=str(e))
 
     email = normalize_email(decoded_token.get("email", ""))
+    uid = decoded_token.get("uid")
     allowed_user = get_allowed_user_data(email)
 
     if not allowed_user:
@@ -296,9 +326,12 @@ def session_login(payload: TokenRequest, response: Response):
         path="/",
     )
 
+    upsert_active_session(uid, email)
+
     return {
         "success": True,
         "message": "Session created",
+        "uid": uid,
         "email": email,
         "role": allowed_user.get("role", "user"),
     }
@@ -321,7 +354,9 @@ def logout(
     if session:
         try:
             decoded_claims = firebase_auth.verify_session_cookie(session, check_revoked=True)
-            firebase_auth.revoke_refresh_tokens(decoded_claims["uid"])
+            uid = decoded_claims["uid"]
+            clear_active_session(uid)
+            firebase_auth.revoke_refresh_tokens(uid)
         except Exception:
             pass
 
@@ -832,3 +867,62 @@ def confirm_password_reset(payload: ConfirmPasswordResetRequest):
     except Exception as e:
         print("CONFIRM PASSWORD RESET ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/refresh-session")
+def refresh_session(payload: RefreshSessionRequest, response: Response):
+    try:
+        decoded_token = firebase_auth.verify_id_token(payload.idToken)
+    except Exception as e:
+        print("REFRESH SESSION VERIFY ERROR:", repr(e))
+        raise HTTPException(status_code=401, detail=str(e))
+
+    uid = decoded_token.get("uid")
+    email = normalize_email(decoded_token.get("email", ""))
+
+    allowed_user = get_allowed_user_data(email)
+    if not allowed_user:
+        raise HTTPException(status_code=403, detail="User is not allowed")
+
+    session_snap = get_session_doc_ref(uid).get()
+    if not session_snap.exists:
+        raise HTTPException(status_code=401, detail="Session not found")
+
+    now = datetime.now(timezone.utc)
+    session_data = session_snap.to_dict()
+    last_activity_at = session_data.get("lastActivityAt")
+
+    if not last_activity_at or (now - last_activity_at).total_seconds() > IDLE_TIMEOUT_SECONDS:
+        clear_active_session(uid)
+        try:
+            firebase_auth.revoke_refresh_tokens(uid)
+        except Exception:
+            pass
+        raise HTTPException(status_code=401, detail="Session expired due to inactivity")
+
+    try:
+        session_cookie = firebase_auth.create_session_cookie(
+            payload.idToken,
+            expires_in=timedelta(seconds=SESSION_EXPIRES_SECONDS)
+        )
+    except Exception as e:
+        print("REFRESH SESSION COOKIE ERROR:", repr(e))
+        raise HTTPException(status_code=401, detail=str(e))
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_cookie,
+        max_age=SESSION_EXPIRES_SECONDS,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        path="/",
+    )
+
+    upsert_active_session(uid, email)
+
+    return {
+        "success": True,
+        "message": "Session refreshed",
+        "email": email,
+        "role": allowed_user.get("role", "user"),
+    }
