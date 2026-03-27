@@ -1,21 +1,19 @@
 import os
 import httpx
 import secrets
+import random
+import re
 
-from helpers.email_service import send_reset_email
+from helpers.email_service import send_reset_code_email
 from helpers.firebase_admin_setup import get_firestore_client, get_firebase_auth
 from helpers.auth_dependencies import SESSION_COOKIE_NAME, normalize_email, get_allowed_user_data
 
 from fastapi import APIRouter, Request, HTTPException, Response, Cookie, Depends
 from pydantic import BaseModel, EmailStr
-from urllib.parse import quote
 from helpers.rate_limit import limiter
 
 from datetime import datetime, timedelta, timezone
 from firebase_admin import firestore
-
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from typing import Optional
 from helpers.auth_dependencies import get_current_user_from_session, require_admin
@@ -51,11 +49,27 @@ class CreateStaffRequest(BaseModel):
 class DeleteStaffRequest(BaseModel):
     email: EmailStr
 
+class RequestPasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class VerifyResetCodeRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class ConfirmPasswordResetRequest(BaseModel):
+    email: EmailStr
+    code: str
+    newPassword: str
+
 # CONFIGURATION
 
 MAX_FAILED_ATTEMPTS = 2  # change to 5 later
 RESET_COOLDOWN_SECONDS = 60  
 SESSION_EXPIRES_SECONDS = 60 * 60 * 8  # 8 hours fixed session duration for simplicity, can be changed to refresh tokens later
+RESET_CODE_EXPIRES_MINUTES = 10
+RESET_MAX_VERIFY_ATTEMPTS = 5
 
 # HELPER FUNCTIONS
 
@@ -78,6 +92,18 @@ def get_lockout_duration_seconds(level: int) -> int:
 #     elif level == 3:
 #         return 900
 #     return 1800
+
+def generate_six_digit_code() -> str:
+    return f"{random.randint(0, 999999):06d}"
+
+
+def is_valid_password(password: str) -> bool:
+    return (
+        len(password) >= 8
+        and re.search(r"[A-Z]", password)
+        and re.search(r"[0-9]", password)
+        and re.search(r"[!@#$%^&*]", password)
+    )
 
 # ENDPOINTS
 
@@ -108,50 +134,6 @@ async def verify_captcha(payload: CaptchaRequest, request: Request):
         )
 
     return {"success": True}
-
-# Password reset endpoint
-@router.post("/reset-password")
-@limiter.limit("5/minute")
-def reset_password(request: Request, data: ResetRequest):
-    email = normalize_email(str(data.email))
-
-    doc_ref = db.collection("passwordResetAttempts").document(email)
-    snap = doc_ref.get()
-
-    now = datetime.now(timezone.utc)
-
-    if snap.exists:
-        existing = snap.to_dict()
-        last_request_at = existing.get("lastRequestAt")
-
-        if last_request_at:
-            elapsed = (now - last_request_at).total_seconds()
-
-            if elapsed < RESET_COOLDOWN_SECONDS:
-                remaining = int(RESET_COOLDOWN_SECONDS - elapsed)
-                return {
-                    "success": False,
-                    "message": "Please wait before requesting another reset email.",
-                    "remainingSeconds": max(remaining, 1),
-                }
-
-    reset_link = f"http://localhost:3000/reset-password?email={quote(email)}"
-    print("RESET LINK:", reset_link)
-
-    doc_ref.set(
-        {
-            "email": email,
-            "lastRequestAt": now,
-            "updatedAt": firestore.SERVER_TIMESTAMP,
-        },
-        merge=True,
-    )
-
-    return {
-        "success": True,
-        "message": "Password reset email sent",
-        "remainingSeconds": 0,
-    }
 
 # Endpoints for tracking login attempts and lockout status
 @router.post("/check-lockout")
@@ -579,3 +561,171 @@ def delete_staff(
     except Exception as e:
         print("DELETE STAFF ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e)) 
+    
+@router.post("/request-password-reset")
+@limiter.limit("5/minute")
+def request_password_reset(request: Request, payload: RequestPasswordResetRequest):
+    email = normalize_email(str(payload.email))
+
+    allowed_user = get_allowed_user_data(email)
+    if not allowed_user:
+        raise HTTPException(status_code=404, detail="No active account found for this email")
+
+    doc_ref = db.collection("passwordResetOtps").document(email)
+    snap = doc_ref.get()
+    now = datetime.now(timezone.utc)
+
+    if snap.exists:
+        existing = snap.to_dict()
+        last_request_at = existing.get("lastRequestAt")
+
+        if last_request_at:
+            elapsed = (now - last_request_at).total_seconds()
+            if elapsed < RESET_COOLDOWN_SECONDS:
+                remaining = int(RESET_COOLDOWN_SECONDS - elapsed)
+                return {
+                    "success": False,
+                    "message": "Please wait before requesting another code.",
+                    "remainingSeconds": max(remaining, 1),
+                }
+
+    code = generate_six_digit_code()
+    expires_at = now + timedelta(minutes=RESET_CODE_EXPIRES_MINUTES)
+
+    doc_ref.set(
+        {
+            "email": email,
+            "code": code,
+            "expiresAt": expires_at,
+            "used": False,
+            "attemptCount": 0,
+            "verified": False,
+            "lastRequestAt": now,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+    send_reset_code_email(email, code)
+
+    return {
+        "success": True,
+        "message": "Verification code sent",
+        "remainingSeconds": 0,
+    }
+
+
+@router.post("/verify-reset-code")
+def verify_reset_code(payload: VerifyResetCodeRequest):
+    email = normalize_email(str(payload.email))
+    code = payload.code.strip()
+
+    doc_ref = db.collection("passwordResetOtps").document(email)
+    snap = doc_ref.get()
+
+    if not snap.exists:
+        raise HTTPException(status_code=400, detail="No reset code found for this email")
+
+    data = snap.to_dict()
+    now = datetime.now(timezone.utc)
+
+    if data.get("used"):
+        raise HTTPException(status_code=400, detail="This reset code has already been used")
+
+    expires_at = data.get("expiresAt")
+    if not expires_at or expires_at <= now:
+        raise HTTPException(status_code=400, detail="Reset code has expired")
+
+    attempt_count = data.get("attemptCount", 0)
+    if attempt_count >= RESET_MAX_VERIFY_ATTEMPTS:
+        raise HTTPException(status_code=400, detail="Too many invalid attempts. Request a new code")
+
+    if data.get("code") != code:
+        doc_ref.set(
+            {
+                "attemptCount": attempt_count + 1,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        raise HTTPException(status_code=400, detail="Invalid verification code")
+
+    doc_ref.set(
+        {
+            "verified": True,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+    return {
+        "success": True,
+        "message": "Code verified successfully",
+    }
+
+
+@router.post("/confirm-password-reset")
+def confirm_password_reset(payload: ConfirmPasswordResetRequest):
+    email = normalize_email(str(payload.email))
+    code = payload.code.strip()
+    new_password = payload.newPassword
+
+    if not is_valid_password(new_password):
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 8 characters and include an uppercase letter, number, and special character",
+        )
+
+    doc_ref = db.collection("passwordResetOtps").document(email)
+    snap = doc_ref.get()
+
+    if not snap.exists:
+        raise HTTPException(status_code=400, detail="No reset request found")
+
+    data = snap.to_dict()
+    now = datetime.now(timezone.utc)
+
+    if data.get("used"):
+        raise HTTPException(status_code=400, detail="This reset code has already been used")
+
+    if not data.get("verified"):
+        raise HTTPException(status_code=400, detail="Verification code has not been verified")
+
+    expires_at = data.get("expiresAt")
+    if not expires_at or expires_at <= now:
+        raise HTTPException(status_code=400, detail="Reset code has expired")
+
+    if data.get("code") != code:
+        raise HTTPException(status_code=400, detail="Invalid verification code")
+
+    try:
+        user_record = firebase_auth.get_user_by_email(email)
+        firebase_auth.update_user(user_record.uid, password=new_password)
+
+        doc_ref.set(
+            {
+                "used": True,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        login_attempt_ref = db.collection("loginAttempts").document(email)
+        login_attempt_ref.set(
+            {
+                "failedAttempts": 0,
+                "lockoutLevel": 0,
+                "lockoutUntil": None,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        return {
+            "success": True,
+            "message": "Password reset successful",
+        }
+
+    except Exception as e:
+        print("CONFIRM PASSWORD RESET ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
