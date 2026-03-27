@@ -1,9 +1,11 @@
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from fastapi import Cookie, Depends, HTTPException
 from helpers.firebase_admin_setup import get_firestore_client, get_firebase_auth
 
 SESSION_COOKIE_NAME = "session"
+IDLE_TIMEOUT_SECONDS = 10 * 60  # keep same as auth.py
 
 db = get_firestore_client()
 firebase_auth = get_firebase_auth()
@@ -29,6 +31,10 @@ def get_allowed_user_data(email: str):
     return data
 
 
+def get_session_doc_ref(uid: str):
+    return db.collection("activeSessions").document(uid)
+
+
 async def get_current_user_from_session(
     session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME)
 ):
@@ -43,14 +49,43 @@ async def get_current_user_from_session(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
 
+    uid = decoded_claims.get("uid")
     email = normalize_email(decoded_claims.get("email", ""))
-    allowed_user = get_allowed_user_data(email)
 
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    session_snap = get_session_doc_ref(uid).get()
+    if not session_snap.exists:
+        raise HTTPException(status_code=401, detail="Session not found")
+
+    session_data = session_snap.to_dict()
+    last_activity_at = session_data.get("lastActivityAt")
+    now = datetime.now(timezone.utc)
+
+    if not last_activity_at:
+        get_session_doc_ref(uid).delete()
+        try:
+            firebase_auth.revoke_refresh_tokens(uid)
+        except Exception:
+            pass
+        raise HTTPException(status_code=401, detail="Session expired due to inactivity")
+
+    idle_seconds = (now - last_activity_at).total_seconds()
+    if idle_seconds > IDLE_TIMEOUT_SECONDS:
+        get_session_doc_ref(uid).delete()
+        try:
+            firebase_auth.revoke_refresh_tokens(uid)
+        except Exception:
+            pass
+        raise HTTPException(status_code=401, detail="Session expired due to inactivity")
+
+    allowed_user = get_allowed_user_data(email)
     if not allowed_user:
         raise HTTPException(status_code=403, detail="User is not allowed")
 
     return {
-        "uid": decoded_claims.get("uid"),
+        "uid": uid,
         "email": email,
         "role": allowed_user.get("role", "user"),
     }
