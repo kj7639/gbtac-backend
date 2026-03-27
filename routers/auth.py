@@ -6,9 +6,9 @@ import re
 
 from helpers.email_service import send_reset_code_email
 from helpers.firebase_admin_setup import get_firestore_client, get_firebase_auth
-from helpers.auth_dependencies import SESSION_COOKIE_NAME, normalize_email, get_allowed_user_data
+from helpers.auth_dependencies import SESSION_COOKIE_NAME, normalize_email, get_allowed_user_data, require_admin, get_current_user_from_session
 
-from fastapi import APIRouter, Request, HTTPException, Response, Cookie, Depends
+from fastapi import APIRouter, Request, HTTPException, Response, Cookie, Depends, Query
 from pydantic import BaseModel, EmailStr
 from helpers.rate_limit import limiter
 
@@ -16,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 from firebase_admin import firestore
 
 from typing import Optional
-from helpers.auth_dependencies import get_current_user_from_session, require_admin
 
 router = APIRouter(prefix="/auth")
 
@@ -52,11 +51,9 @@ class DeleteStaffRequest(BaseModel):
 class RequestPasswordResetRequest(BaseModel):
     email: EmailStr
 
-
 class VerifyResetCodeRequest(BaseModel):
     email: EmailStr
     code: str
-
 
 class ConfirmPasswordResetRequest(BaseModel):
     email: EmailStr
@@ -415,109 +412,215 @@ def update_profile(payload: UpdateProfileRequest):
     except Exception as e:
         print("UPDATE PROFILE ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
-    
-@router.post("/create-staff")
-def create_staff(
-    payload: CreateStaffRequest,
-    admin_user=Depends(require_admin)
-):
-    email = normalize_email(str(payload.email))
 
-    if not (email.endswith("@sait.ca") or email.endswith("@edu.sait.ca")):
-        raise HTTPException(
-            status_code=400,
-            detail="Email must be a SAIT email (@sait.ca or @edu.sait.ca)"
-        )
-
-    first_name = payload.firstName.strip()
-    last_name = payload.lastName.strip()
-
-    if not first_name or not last_name:
-        raise HTTPException(status_code=400, detail="First name and last name are required")
-
-    doc_ref = db.collection("allowedUsers").document(email)
-    existing_doc = doc_ref.get()
-
-    if existing_doc.exists:
-        raise HTTPException(status_code=409, detail="Staff account already exists")
-
+# Endpoint to get all staff accounts (admin only)
+@router.get("/staff")
+async def get_all_staff(admin_user=Depends(require_admin)):
     try:
-        firebase_auth.get_user_by_email(email)
-        raise HTTPException(status_code=409, detail="A Firebase Auth user with this email already exists")
+        users_ref = db.collection("allowedUsers")
+        docs = users_ref.stream()
+        
+        staff_list = []
+        for doc in docs:
+            data = doc.to_dict()
+            staff_list.append({
+                "email": doc.id,
+                "firstName": data.get("firstName", ""),
+                "lastName": data.get("lastName", ""),
+                "role": data.get("role", "staff"),
+                "active": data.get("active", True),
+                "createdAt": data.get("createdAt"),
+                "updatedAt": data.get("updatedAt")
+            })
+        
+        return {
+            "success": True,
+            "staff": staff_list
+        }
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
+        print("GET ALL STAFF ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-        error_text = str(e).lower()
-        if "no user record" not in error_text and "user-not-found" not in error_text:
-            raise HTTPException(status_code=500, detail=str(e))
-
+# Endpoint to get a single staff member by email (admin only) - using query parameter
+@router.get("/staff-by-email")
+async def get_staff_by_email(email: str = Query(...), admin_user=Depends(require_admin)):
+    normalized_email = normalize_email(email)
+    
+    print(f"GET STAFF BY EMAIL - Email param: {email}")
+    print(f"GET STAFF BY EMAIL - Normalized email: {normalized_email}")
+    
     try:
-        temp_password = secrets.token_urlsafe(12)
+        doc_ref = db.collection("allowedUsers").document(normalized_email)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            print(f"GET STAFF BY EMAIL - Document not found for: {normalized_email}")
+            raise HTTPException(status_code=404, detail=f"Staff member not found: {normalized_email}")
+        
+        data = doc.to_dict()
+        return {
+            "success": True,
+            "staff": {
+                "email": doc.id,
+                "firstName": data.get("firstName", ""),
+                "lastName": data.get("lastName", ""),
+                "role": data.get("role", "staff"),
+                "active": data.get("active", True),
+                "createdAt": data.get("createdAt"),
+                "updatedAt": data.get("updatedAt")
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("GET STAFF BY EMAIL ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-        user_record = firebase_auth.create_user(
-            email=email,
-            password=temp_password,
-            display_name=f"{first_name} {last_name}",
-            disabled=not payload.active,
-        )
+# Endpoint to create a new staff account (admin only)
+class CreateStaffRequest(BaseModel):
+    email: EmailStr
+    firstName: str
+    lastName: str
+    active: bool = True
 
+@router.post("/create-staff")
+async def create_staff(payload: CreateStaffRequest, admin_user=Depends(require_admin)):
+    email = normalize_email(str(payload.email))
+    
+    try:
+        # Check if user already exists
+        doc_ref = db.collection("allowedUsers").document(email)
+        doc = doc_ref.get()
+        
+        if doc.exists:
+            raise HTTPException(status_code=400, detail="Staff member with this email already exists")
+        
+        # Create new staff member
         staff_data = {
             "email": email,
-            "firstName": first_name,
-            "lastName": last_name,
+            "firstName": payload.firstName,
+            "lastName": payload.lastName,
             "role": "staff",
             "active": payload.active,
-            "uid": user_record.uid,
             "createdAt": firestore.SERVER_TIMESTAMP,
-            "updatedAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP
         }
-
+        
         doc_ref.set(staff_data)
-
+        
         return {
             "success": True,
             "message": "Staff account created successfully",
-            "staff": {
-                "email": email,
-                "firstName": first_name,
-                "lastName": last_name,
-                "role": "staff",
-                "active": payload.active,
-                "uid": user_record.uid,
-            }
+            "email": email
         }
-
     except HTTPException:
         raise
     except Exception as e:
         print("CREATE STAFF ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+# Endpoint for admin to update staff profile (with password restriction)
+class AdminUpdateStaffRequest(BaseModel):
+    originalEmail: EmailStr
+    email: EmailStr
+    firstName: str
+    lastName: str
+    active: bool
+    password: Optional[str] = None
+
+@router.post("/admin/update-staff")
+async def admin_update_staff(payload: AdminUpdateStaffRequest, admin_user=Depends(require_admin)):
+    original_email = normalize_email(str(payload.originalEmail))
+    new_email = normalize_email(str(payload.email))
     
-@router.get("/get-staff")
-def get_staff(admin_user=Depends(require_admin)):
+    # Block password changes from admin
+    if payload.password is not None and payload.password.strip() != "":
+        raise HTTPException(
+            status_code=403, 
+            detail="Admins cannot change user passwords. Password changes must be done by the user."
+        )
+    
     try:
-        docs = db.collection("allowedUsers").stream()
-
-        staff_list = []
-
-        for doc in docs:
-            data = doc.to_dict()
-
-            staff_list.append({
-                "email": data.get("email"),
-                "name": f"{data.get('firstName', '')} {data.get('lastName', '')}",
-                "role": data.get("role"),
-                "status": "Active" if data.get("active") else "Inactive",
+        # Get the original document
+        old_doc_ref = db.collection("allowedUsers").document(original_email)
+        old_doc = old_doc_ref.get()
+        
+        if not old_doc.exists:
+            raise HTTPException(status_code=404, detail="Staff member not found")
+        
+        # Check if email is being changed
+        email_changed = original_email != new_email
+        
+        if email_changed:
+            # Check if new email already exists in Firestore
+            new_doc_ref = db.collection("allowedUsers").document(new_email)
+            new_doc = new_doc_ref.get()
+            
+            if new_doc.exists:
+                raise HTTPException(status_code=400, detail="A user with this email already exists")
+            
+            # Get existing user data
+            user_data = old_doc.to_dict()
+            
+            # Update Firebase Auth user email
+            try:
+                # Get user by email from Firebase Auth
+                user = firebase_auth.get_user_by_email(original_email)
+                
+                # Update the email in Firebase Auth
+                firebase_auth.update_user(
+                    user.uid,
+                    email=new_email
+                )
+                
+                print(f"ADMIN UPDATE - Firebase Auth email updated from {original_email} to {new_email}")
+            except Exception as auth_error:
+                print(f"ADMIN UPDATE - Firebase Auth error: {repr(auth_error)}")
+                # If user doesn't exist in Firebase Auth, that's okay - they might not have logged in yet
+                # Continue with Firestore update
+            
+            # Update with new values
+            user_data.update({
+                "email": new_email,
+                "firstName": payload.firstName,
+                "lastName": payload.lastName,
+                "active": payload.active,
+                "updatedAt": firestore.SERVER_TIMESTAMP
             })
-
-        return {
-            "success": True,
-            "staff": staff_list
-        }
-
+            
+            # Create new document with new email
+            new_doc_ref.set(user_data)
+            
+            # Delete old document
+            old_doc_ref.delete()
+            
+            return {
+                "success": True,
+                "message": "Staff profile and email updated successfully in both Auth and Firestore",
+                "email": new_email,
+                "emailChanged": True
+            }
+        else:
+            # Email not changed, just update the existing document
+            update_data = {
+                "firstName": payload.firstName,
+                "lastName": payload.lastName,
+                "active": payload.active,
+                "updatedAt": firestore.SERVER_TIMESTAMP
+            }
+            
+            old_doc_ref.update(update_data)
+            
+            return {
+                "success": True,
+                "message": "Staff profile updated successfully",
+                "email": original_email,
+                "emailChanged": False
+            }
+    except HTTPException:
+        raise
     except Exception as e:
-        print("GET STAFF ERROR:", repr(e))
+        print("ADMIN UPDATE STAFF ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/delete-staff")
