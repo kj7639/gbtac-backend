@@ -97,8 +97,8 @@ async def get_data(request: Request, sensor_code, start=NEWEST, end="", agg="non
         freq_map = {
             "H": "h",
             "D": "D",
-            "M": "ME",
-            "Y": "YE",
+            "M": "MS",
+            "Y": "YS",
         }
 
         freq = freq_map[agg]
