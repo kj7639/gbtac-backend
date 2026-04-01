@@ -1,3 +1,13 @@
+"""
+routers/__init__.py
+
+Shared imports and constants used by all router modules. Establishes the
+database connection string, validation helpers, and date boundary constants
+(NEWEST / OLDEST) that are resolved once at startup.
+
+Author: Dominique Anne Lee
+"""
+
 from fastapi import APIRouter
 import pyodbc
 from config import connection_str

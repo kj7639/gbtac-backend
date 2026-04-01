@@ -1,3 +1,12 @@
+"""
+config.py
+
+Loads environment variables from .env and builds the pyodbc connection string
+for the SQL Server database.
+
+Author: Dominique Anne Lee
+"""
+
 import os
 from dotenv import load_dotenv
 from pathlib import Path

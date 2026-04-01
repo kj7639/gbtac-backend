@@ -1,3 +1,15 @@
+"""
+auth.py
+
+Router for authentication, session management, staff CRUD, and password reset
+flows. Integrates Firebase Auth for identity, Firestore for user records and
+session tracking, and Cloudflare Turnstile for CAPTCHA verification. Provides
+the update-profile and admin/update-staff endpoints used by the Edit Staff
+Profile and Edit Staff (admin) pages.
+
+Author: Dominique Anne Lee
+"""
+
 import os
 import httpx
 import secrets
