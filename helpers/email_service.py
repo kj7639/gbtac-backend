@@ -1,3 +1,12 @@
+"""
+email_service.py
+
+Sends password reset verification codes via Gmail SMTP. Constructs both
+plain-text and HTML email bodies with the six-digit code.
+
+Author: Dominique Anne Lee
+"""
+
 import os
 import smtplib
 from email.mime.multipart import MIMEMultipart

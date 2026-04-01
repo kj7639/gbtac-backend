@@ -1,3 +1,13 @@
+"""
+firebase_admin_setup.py
+
+Initializes the Firebase Admin SDK using a service account JSON file and
+provides accessor functions for Firebase Auth and Firestore clients. Used
+by the auth endpoints that support Edit Staff Profile and Edit Staff (admin).
+
+Author: Dominique Anne Lee
+"""
+
 import os
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
