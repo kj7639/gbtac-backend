@@ -1,3 +1,14 @@
+"""
+main.py
+
+Entry point for the GBTAC Analytics REST API.
+Configures middleware, rate limiting, CORS, and registers all routers.
+
+Run with: uvicorn main:app --reload
+
+Author: Dominique Anne Lee
+"""
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler

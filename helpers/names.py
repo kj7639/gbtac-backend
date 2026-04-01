@@ -1,3 +1,13 @@
+"""
+names.py
+
+Loads a static JSON mapping of sensor codes to human-readable display names
+and provides a lookup function used by the graph endpoints that serve the
+Ambient Temperature and Wall Temperature dashboards.
+
+Author: Dominique Anne Lee
+"""
+
 from pathlib import Path
 import json
 
