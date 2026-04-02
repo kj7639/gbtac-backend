@@ -1,4 +1,15 @@
+"""
+energy.py
+
+Provides endpoints for retrieving aggregated energy data, including sensor-based
+summations, dashboard card metrics, and combined electricity and natural gas
+totals. Used by energy-related dashboards.
+
+Author: Kiera Johnson 
+"""
+
 import pandas as pd
+import pyodbc
 
 from routers import *
 from routers.natural_gas import load_natural_gas
@@ -8,33 +19,53 @@ from helpers.auth_dependencies import get_current_user_from_session
 
 router = APIRouter(prefix="/energy")
 
+
 @router.get("/sum/{sensor_code}")
 @limiter.limit("10/minute")
-async def get_data(request: Request, sensor_code, start=NEWEST, end="", _user=Depends(get_current_user_from_session)):
+async def get_data(
+    request: Request,
+    sensor_code: str,
+    start: str = NEWEST,
+    end: str = "",
+    _user=Depends(get_current_user_from_session)
+) -> float | str:
+    """
+    Returns the summed sensor value over a given date range.
 
-    #validation:
+    Args:
+        request: Incoming request used for rate limiting.
+        sensor_code: Sensor identifier.
+        start: Start date (ISO string).
+        end: End date (ISO string). Defaults to start date if not provided.
+        _user: Authenticated user dependency.
+
+    Returns:
+        Sum of sensor values for the given range, or an error message string
+        if validation fails.
+
+    Raises:
+        HTTPException: Not used directly; validation errors return messages.
+    """
     san_code = validateCode(sensor_code)
-    if san_code == False:
+    if san_code is False:
         return "enter valid sensor code"
 
     san_start = validateDate(start)
-    if san_start == False:
+    if san_start is False:
         return "invalid start date"
-    
-    # sets end date range to the same day as start if it wasn't included
+
     if end == "":
         end = san_start
-    
+
     san_end = validateDate(end)
-    if san_end == False:
+    if san_end is False:
         return "invalid end date"
-    
+
     if san_end < san_start:
         return "end date cannot be earlier than start date"
-    
+
     column_name = f"{SENSOR_PRE}{san_code}"
 
-    # open connection
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
@@ -45,87 +76,124 @@ async def get_data(request: Request, sensor_code, start=NEWEST, end="", _user=De
         AND CAST(ts AS DATE) <= ?
     """
 
-    #query database
     curs.execute(query, (san_start, san_end))
     rows = curs.fetchall()
 
     res = rows[0][0]
 
-    #close connection and send data
     conn.close()
     return res
 
 
-# returns card information
 @router.get("/cards")
 @limiter.limit("20/minute")
-async def get_card_data(request: Request, start, end, _user=Depends(get_current_user_from_session)):
+async def get_card_data(
+    request: Request,
+    start: str,
+    end: str,
+    _user=Depends(get_current_user_from_session)
+) -> list[dict]:
+    """
+    Returns aggregated energy metrics for dashboard cards.
 
+    Provides average, maximum, and minimum values for generation and consumption.
+
+    Args:
+        request: Incoming request used for rate limiting.
+        start: Start date (ISO string).
+        end: End date (ISO string).
+        _user: Authenticated user dependency.
+
+    Returns:
+        List of dictionaries containing metric labels and values.
+
+    Raises:
+        HTTPException: Not used directly; validation errors return messages.
+    """
     san_start = validateDate(start)
-    if san_start == False:
+    if san_start is False:
         return "invalid start date"
-    
+
     san_end = validateDate(end)
-    if san_end == False:
+    if san_end is False:
         return "invalid end date"
-    
+
     if san_end < san_start:
         return "end date cannot be earlier than start date"
-       
+
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
-    query = f"""
-        select avg(SaitSolarLab_30000_TL340) as "Average Generation",
-        max(SaitSolarLab_30000_TL340) as "Maximum Generation", 
-        min(SaitSolarLab_30000_TL340) as "Minimum Generation",
-        avg(SaitSolarLab_30000_TL341) as "Average Consumption", 
-        max(SaitSolarLab_30000_TL341) as "Maximum Consumption", 
-        min(SaitSolarLab_30000_TL341) as "Minimum Consumption"
-        from gbtac_data
-        where cast(ts as date) >= ?
-        and cast(ts as date) <= ?
+    query = """
+        SELECT 
+            AVG(SaitSolarLab_30000_TL340) AS "Average Generation",
+            MAX(SaitSolarLab_30000_TL340) AS "Maximum Generation",
+            MIN(SaitSolarLab_30000_TL340) AS "Minimum Generation",
+            AVG(SaitSolarLab_30000_TL341) AS "Average Consumption",
+            MAX(SaitSolarLab_30000_TL341) AS "Maximum Consumption",
+            MIN(SaitSolarLab_30000_TL341) AS "Minimum Consumption"
+        FROM GBTAC_data
+        WHERE CAST(ts AS DATE) >= ?
+        AND CAST(ts AS DATE) <= ?
     """
 
-    #query database
     curs.execute(query, (san_start, san_end))
     columns = [column[0] for column in curs.description]
     rows = curs.fetchall()
 
     res = []
-    i = 0
-    for col in columns:
+    for i, col in enumerate(columns):
         res.append({
             "label": col,
             "value": rows[0][i]
         })
-        i += 1
 
     conn.close()
     return res
+
 
 @router.get("/total/{sensor_code}")
 @limiter.limit("10/minute")
 async def total_energy(
     request: Request,
-    sensor_code,
-    start="2023-01-01",
-    end="",
+    sensor_code: str,
+    start: str = "2023-01-01",
+    end: str = "",
     _user=Depends(get_current_user_from_session)
-):
+) -> list[dict]:
+    """
+    Returns combined monthly energy totals for electricity and natural gas.
+
+    Electricity data is aggregated from sensor readings, while natural gas
+    values are loaded from a separate dataset and merged by month.
+
+    Args:
+        request: Incoming request used for rate limiting.
+        sensor_code: Sensor identifier for electricity data.
+        start: Start date (ISO string).
+        end: End date (ISO string). Defaults to start date if not provided.
+        _user: Authenticated user dependency.
+
+    Returns:
+        List of monthly energy records containing natural gas, electricity,
+        and total energy values in kWh.
+
+    Raises:
+        HTTPException: Not used directly; validation errors return messages.
+    """
     san_code = validateCode(sensor_code)
-    if san_code == False:
+    if san_code is False:
         return "enter valid sensor code"
 
     san_start = validateDate(start)
-    if san_start == False:
+    if san_start is False:
         return "invalid start date"
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
-    if san_end == False:
+    if san_end is False:
         return "invalid end date"
 
     if san_end < san_start:
@@ -136,7 +204,7 @@ async def total_energy(
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
-    # natural gas
+    # Load natural gas data and filter by month range
     gas_df = load_natural_gas()
 
     start_month = pd.to_datetime(san_start).strftime("%Y-%m")
@@ -149,7 +217,7 @@ async def total_energy(
         for _, row in gas_df.iterrows()
     }
 
-    # electricity (W → kWh)
+    # Aggregate electricity data (W → kWh conversion)
     query = f"""
         SELECT 
             FORMAT(ts, 'yyyy-MM') AS month,
