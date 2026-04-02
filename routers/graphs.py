@@ -6,65 +6,84 @@ sensor name lookups, code-name listings, and newest/oldest timestamp queries
 against the GBTAC_data and sensor_names tables. Used by the Ambient Temperature
 and Wall Temperature dashboards.
 
-Author: Dominique Anne Lee
+Author: Dominique Anne Lee, Anna Yabut, Kiera Johnson
 """
 
 from routers import *
 import pandas as pd
+import pyodbc
+
 from helpers.forecasting import get_forecast
-from pathlib import Path 
 from helpers.rate_limit import limiter
 from fastapi import APIRouter, Request, Depends
 from helpers.auth_dependencies import get_current_user_from_session
-from datetime import datetime
 from helpers.names import replace_name
 
 router = APIRouter(prefix="/graphs")
 
-# url format "http://127.0.0.1:8000/graphs/data/{sensor code}?start={start date}&end={end date}"
-# example url: http://127.0.0.1:8000/graphs/data/20000_TL92?start=2025-06-13&end=2025-06-18&agg=D
-# - code is the end part of the sensor name (not including the 'SaitSolarLab' part), mandatory
-# - start and end date, YYYY-MM-DD
-# - agg is the time range, H for hourly, D for daily, W for weekly, M for monthly, Y for yearly
-# - type is for kind of aggregation, mean or sum
+
 @router.get("/data/{sensor_code}")
 @limiter.limit("10/minute")
-async def get_data(request: Request, sensor_code, start=NEWEST, end="", agg="none", type="mean", _user=Depends(get_current_user_from_session)):
-    
-    #validation:
+async def get_data(
+    request: Request,
+    sensor_code: str,
+    start: str = NEWEST,
+    end: str = "",
+    agg: str = "none",
+    type: str = "mean",
+    _user=Depends(get_current_user_from_session)
+) -> list | str:
+    """
+    Retrieves time-series sensor data with optional aggregation and forecasting.
+
+    Supports filtering by date range, aggregation intervals (hourly, daily,
+    monthly, yearly), and aggregation types (mean or sum). If the requested
+    end date extends beyond available data, forecasted values are appended.
+
+    Args:
+        request: Incoming request used for rate limiting.
+        sensor_code: Sensor identifier.
+        start: Start date (ISO string).
+        end: End date (ISO string). Defaults to start date if not provided.
+        agg: Aggregation interval (none, H, D, M, Y).
+        type: Aggregation type (mean or sum).
+        _user: Authenticated user dependency.
+
+    Returns:
+        List of timestamped sensor readings or aggregated values. Returns
+        an error message string if validation fails.
+
+    Raises:
+        HTTPException: Not used directly; validation errors return messages.
+    """
     san_code = validateCode(sensor_code)
-    if san_code == False:
+    if san_code is False:
         return "enter valid sensor code"
 
     san_start = validateDate(start)
-    if san_start == False:
+    if san_start is False:
         return "invalid start date"
-    
-    # sets end date range to the same day as start if it wasn't included
+
     if end == "":
         end = san_start
-    
+
     san_end = validateDate(end)
-    if san_end == False:
+    if san_end is False:
         return "invalid end date"
-    
+
     if san_end < san_start:
         return "end date cannot be earlier than start date"
-    
-    allowedAgg = ["none", "H", "D", "M", "Y"]
-    if agg not in allowedAgg:
+
+    if agg not in ["none", "H", "D", "M", "Y"]:
         return "invalid aggregation interval"
 
-    allowedType = ["mean", "sum"]
-    if type not in allowedType:
+    if type not in ["mean", "sum"]:
         return "invalid aggregation type"
-    
+
     column_name = f"{SENSOR_PRE}{san_code}"
 
-    # open connection
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
-
 
     query = f"""
         SELECT ts, {column_name}
@@ -75,30 +94,22 @@ async def get_data(request: Request, sensor_code, start=NEWEST, end="", agg="non
         ORDER BY ts
     """
 
-    #query database
     curs.execute(query, (san_start, san_end))
     rows = curs.fetchall()
 
-    #format data 
-    res = []
-    for row in rows:
-        res.append({
-            "ts": row[0],
-            "data": row[1]
-        })
-
+    res = [{"ts": row[0], "data": row[1]} for row in rows]
 
     conn.close()
 
     if res == []:
         return []
-    
-    # forecast data if end date is in the future
+
+    # Append forecast data when requesting beyond available dataset
     if san_end > NEWEST:
         forecasted_data = get_forecast(san_code, NEWEST, san_end)
         res = res + forecasted_data
 
-    # aggregates data
+    # Apply aggregation if requested
     if agg != "none":
         df = pd.DataFrame(res)
         df = df.dropna()
@@ -114,53 +125,78 @@ async def get_data(request: Request, sensor_code, start=NEWEST, end="", agg="non
 
         freq = freq_map[agg]
 
-        if type == "mean":
-            df_agg = df.resample(freq).mean()
-        else:
-            df_agg = df.resample(freq).sum()
+        df_agg = df.resample(freq).mean() if type == "mean" else df.resample(freq).sum()
 
         df_agg = df_agg.astype(object).where(pd.notna(df_agg), other=None)
         res = df_agg.reset_index().to_dict(orient="records")
 
     return res
 
-# url format: "http://127.0.0.1:8000/graphs/name/{sensor code}"
-# example url: http://127.0.0.1:8000/graphs/name/20000_TL92
+
 @router.get("/name/{sensor_code}")
 @limiter.limit("30/minute")
-async def get_name(request: Request, sensor_code, _user=Depends(get_current_user_from_session)):
+async def get_name(
+    request: Request,
+    sensor_code: str,
+    _user=Depends(get_current_user_from_session)
+) -> str:
+    """
+    Retrieves the display name for a given sensor code.
 
-    # validation
+    Attempts to resolve the name using a local mapping first, then falls back
+    to the sensor_names database table if not found.
+
+    Args:
+        request: Incoming request used for rate limiting.
+        sensor_code: Sensor identifier.
+        _user: Authenticated user dependency.
+
+    Returns:
+        Human-readable sensor name or an error message string if invalid.
+    """
     san_code = validateCode(sensor_code)
-    if san_code == False:
+    if san_code is False:
         return "enter valid sensor code"
-    
+
     name = replace_name(san_code)
-    if name != False:
+    if name is not False:
         return name
 
-    # open connection
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
     query = """
         SELECT * FROM sensor_names
         WHERE sensor_name_source = ?
-    """    
+    """
 
-    #query database
     curs.execute(query, (san_code,))
     rows = curs.fetchall()
 
     res = rows[0][2] if rows != [] else "name not found"
+
     conn.close()
     return res
 
 
 @router.get("/codesnames")
 @limiter.limit("30/minute")
-async def get_codesnames(request: Request, _user=Depends(get_current_user_from_session)):
-    # open connection
+async def get_codesnames(
+    request: Request,
+    _user=Depends(get_current_user_from_session)
+) -> list[dict]:
+    """
+    Retrieves all sensor codes and their corresponding display names.
+
+    Combines database values with local replacement mappings when available.
+
+    Args:
+        request: Incoming request used for rate limiting.
+        _user: Authenticated user dependency.
+
+    Returns:
+        List of dictionaries containing sensor codes and display names.
+    """
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
@@ -168,9 +204,8 @@ async def get_codesnames(request: Request, _user=Depends(get_current_user_from_s
         SELECT sensor_name_source, sensor_name_report 
         FROM sensor_names
         ORDER BY sensor_name_source
-        """ 
+    """
 
-    #query database
     curs.execute(query)
     rows = curs.fetchall()
 
@@ -178,8 +213,9 @@ async def get_codesnames(request: Request, _user=Depends(get_current_user_from_s
     for row in rows:
         code = row[0]
         name = replace_name(code)
-        if name == False:
+        if name is False:
             name = row[1]
+
         res.append({
             "code": code,
             "name": name
@@ -188,9 +224,18 @@ async def get_codesnames(request: Request, _user=Depends(get_current_user_from_s
     conn.close()
     return res
 
+
 @router.get("/newest")
-async def get_newest(_user=Depends(get_current_user_from_session)):
-    # open connection
+async def get_newest(_user=Depends(get_current_user_from_session)) -> str:
+    """
+    Retrieves the most recent timestamp in the dataset.
+
+    Args:
+        _user: Authenticated user dependency.
+
+    Returns:
+        ISO formatted date of the newest available data point.
+    """
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
@@ -198,34 +243,37 @@ async def get_newest(_user=Depends(get_current_user_from_session)):
         SELECT TOP 1 ts
         FROM GBTAC_data
         ORDER BY ts DESC;
-        """ 
+    """
 
-    #query database
     curs.execute(query)
     rows = curs.fetchall()
 
     conn.close()
-    res = rows[0][0]
+    return rows[0][0].date()
 
-    return res.date()
 
 @router.get("/oldest")
-async def get_oldest(_user=Depends(get_current_user_from_session)):
-    # open connection
+async def get_oldest(_user=Depends(get_current_user_from_session)) -> str:
+    """
+    Retrieves the oldest timestamp in the dataset.
+
+    Args:
+        _user: Authenticated user dependency.
+
+    Returns:
+        ISO formatted date of the oldest available data point.
+    """
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
     query = """
         SELECT TOP 1 ts
         FROM GBTAC_data
-        ORDER BY ts asc;
-        """ 
+        ORDER BY ts ASC;
+    """
 
-    #query database
     curs.execute(query)
     rows = curs.fetchall()
 
     conn.close()
-    res = rows[0][0]
-
-    return res.date()
+    return rows[0][0].date()
