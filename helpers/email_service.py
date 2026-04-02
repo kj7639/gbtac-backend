@@ -4,7 +4,7 @@ email_service.py
 Sends password reset verification codes via Gmail SMTP. Constructs both
 plain-text and HTML email bodies with the six-digit code.
 
-Author: Dominique Anne Lee
+Author: Dominique Anne Lee, Anna Yabut
 """
 
 import os
@@ -13,7 +13,21 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 
-def send_reset_code_email(to_email: str, code: str):
+def send_reset_code_email(to_email: str, code: str) -> None:
+    """
+    Sends a password reset verification code to a user via email.
+
+    Constructs both plain-text and HTML email formats and delivers the message
+    using Gmail SMTP with credentials from environment variables.
+
+    Args:
+        to_email: Recipient email address.
+        code: Six-digit verification code to include in the email.
+
+    Raises:
+        ValueError: If SMTP credentials are not set in environment variables.
+        smtplib.SMTPException: If sending the email fails due to SMTP issues.
+    """
     smtp_email = os.getenv("SMTP_EMAIL")
     smtp_password = os.getenv("SMTP_APP_PASSWORD")
 
