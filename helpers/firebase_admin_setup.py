@@ -5,7 +5,7 @@ Initializes the Firebase Admin SDK using a service account JSON file and
 provides accessor functions for Firebase Auth and Firestore clients. Used
 by authentication-related endpoints that require Firebase services.
 
-Author: Dominique Anne Lee
+Author: Anna Yabut
 """
 
 import os
