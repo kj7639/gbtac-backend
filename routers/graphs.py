@@ -226,7 +226,7 @@ async def get_codesnames(
 
 
 @router.get("/newest")
-async def get_newest(_user=Depends(get_current_user_from_session)) -> str:
+async def return_newest(_user=Depends(get_current_user_from_session)) -> str:
     """
     Retrieves the most recent timestamp in the dataset.
 
@@ -236,24 +236,12 @@ async def get_newest(_user=Depends(get_current_user_from_session)) -> str:
     Returns:
         ISO formatted date of the newest available data point.
     """
-    conn = pyodbc.connect(connection_str)
-    curs = conn.cursor()
-
-    query = """
-        SELECT TOP 1 ts
-        FROM GBTAC_data
-        ORDER BY ts DESC;
-    """
-
-    curs.execute(query)
-    rows = curs.fetchall()
-
-    conn.close()
-    return rows[0][0].date()
+    # newest = await get_newest()
+    return NEWEST
 
 
 @router.get("/oldest")
-async def get_oldest(_user=Depends(get_current_user_from_session)) -> str:
+async def return_oldest(_user=Depends(get_current_user_from_session)) -> str:
     """
     Retrieves the oldest timestamp in the dataset.
 
@@ -263,17 +251,5 @@ async def get_oldest(_user=Depends(get_current_user_from_session)) -> str:
     Returns:
         ISO formatted date of the oldest available data point.
     """
-    conn = pyodbc.connect(connection_str)
-    curs = conn.cursor()
-
-    query = """
-        SELECT TOP 1 ts
-        FROM GBTAC_data
-        ORDER BY ts ASC;
-    """
-
-    curs.execute(query)
-    rows = curs.fetchall()
-
-    conn.close()
-    return rows[0][0].date()
+    # oldest
+    return OLDEST
