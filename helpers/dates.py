@@ -13,7 +13,7 @@ import pyodbc
 from config import connection_str
 
 
-def get_newest() -> str:
+def get_newest():
     """
     Retrieves the most recent timestamp from the GBTAC_data table.
 
@@ -40,7 +40,7 @@ def get_newest() -> str:
     return res.isoformat()
 
 
-def get_oldest() -> str:
+def get_oldest():
     """
     Retrieves the earliest timestamp from the GBTAC_data table.
 

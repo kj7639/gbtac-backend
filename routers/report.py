@@ -28,7 +28,7 @@ from reportlab.lib.units import inch
 router = APIRouter(prefix="/report")
 
 
-@router.get("")
+@router.get("", response_model=None)
 async def generate_table_report(
     sensors: str,
     start: str,

@@ -4,7 +4,7 @@ config.py
 Loads environment variables from .env and builds the pyodbc connection string
 for the SQL Server database.
 
-Author: Dominique Anne Lee
+Author: Kiera Johnson
 """
 
 import os

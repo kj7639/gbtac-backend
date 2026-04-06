@@ -6,7 +6,7 @@ boundaries (newest/oldest) resolved at import time, plus a 7-day forecast
 window for future date allowance. Used by the graph endpoints that serve
 the Ambient Temperature and Wall Temperature dashboards.
 
-Author: Dominique Anne Lee, Kiera Johnson
+Author: Anna Yabut, Kiera Johnson
 """
 
 import re

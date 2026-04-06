@@ -32,7 +32,7 @@ async def analyze_text(
     request: Request,
     text: str,
     _user=Depends(get_current_user_from_session)
-) -> list:
+):
     """
     Analyzes text for harmful content using Azure AI Content Safety.
 
