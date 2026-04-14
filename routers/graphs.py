@@ -22,8 +22,113 @@ from helpers.names import replace_name
 router = APIRouter(prefix="/graphs")
 
 
+@router.get("/data/batch")
+@limiter.limit("30/minute")
+async def get_batch_data(
+    request: Request,
+    sensors: str,
+    start: str = NEWEST,
+    end: str = "",
+    agg: str = "none",
+    type: str = "mean",
+    _user=Depends(get_current_user_from_session)
+) -> dict:
+    """
+    Retrieves time-series data for multiple sensors in a single DB query.
+
+    Args:
+        request: Incoming request used for rate limiting.
+        sensors: Comma-separated sensor codes.
+        start: Start date (ISO string).
+        end: End date (ISO string).
+        agg: Aggregation interval (none, H, D, M, Y).
+        type: Aggregation type (mean or sum).
+        _user: Authenticated user dependency.
+
+    Returns:
+        Dict mapping sensor codes to their time-series data arrays.
+    """
+    codes = [c.strip() for c in sensors.split(",") if c.strip()]
+    if not codes:
+        return {}
+
+    san_start = validateDate(start)
+    if san_start is False:
+        return {}
+
+    if end == "":
+        end = san_start
+    san_end = validateDate(end)
+    if san_end is False:
+        return {}
+
+    if san_end < san_start:
+        return {}
+
+    if agg not in ["none", "H", "D", "M", "Y"]:
+        return {}
+    if type not in ["mean", "sum"]:
+        return {}
+
+    # Validate all codes and build column list
+    validated = []
+    for code in codes:
+        san_code = validateCode(code)
+        if san_code is False:
+            continue
+        validated.append(san_code)
+
+    if not validated:
+        return {}
+
+    columns = [f"{SENSOR_PRE}{c}" for c in validated]
+    col_select = ", ".join(columns)
+
+    conn = pyodbc.connect(connection_str)
+    curs = conn.cursor()
+
+    query = f"""
+        SELECT ts, {col_select}
+        FROM GBTAC_data
+        WHERE ts >= ?
+        AND ts < DATEADD(day, 1, CAST(? AS datetime))
+        ORDER BY ts
+    """
+
+    curs.execute(query, (san_start, san_end))
+    rows = curs.fetchall()
+    conn.close()
+
+    result = {}
+    for i, code in enumerate(validated):
+        sensor_rows = [
+            {"ts": row[0], "data": row[i + 1]}
+            for row in rows
+            if row[i + 1] is not None
+        ]
+
+        if sensor_rows and san_end > NEWEST:
+            forecasted_data = get_forecast(code, NEWEST, san_end)
+            sensor_rows = sensor_rows + forecasted_data
+
+        if agg != "none" and sensor_rows:
+            df = pd.DataFrame(sensor_rows)
+            df = df.dropna()
+            df["ts"] = pd.to_datetime(df["ts"])
+            df = df.set_index("ts")
+            freq_map = {"H": "h", "D": "D", "M": "MS", "Y": "YS"}
+            freq = freq_map[agg]
+            df_agg = df.resample(freq).mean() if type == "mean" else df.resample(freq).sum()
+            df_agg = df_agg.astype(object).where(pd.notna(df_agg), other=None)
+            sensor_rows = df_agg.reset_index().to_dict(orient="records")
+
+        result[code] = sensor_rows
+
+    return result
+
+
 @router.get("/data/{sensor_code}")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 async def get_data(
     request: Request,
     sensor_code: str,
@@ -85,12 +190,14 @@ async def get_data(
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
+    # Use direct datetime range comparison instead of CAST(ts AS DATE)
+    # so SQL Server can use an index on the ts column
     query = f"""
         SELECT ts, {column_name}
         FROM GBTAC_data
         WHERE {column_name} IS NOT NULL
-        AND CAST(ts AS DATE) >= ?
-        AND CAST(ts AS DATE) <= ?
+        AND ts >= ?
+        AND ts < DATEADD(day, 1, CAST(? AS datetime))
         ORDER BY ts
     """
 
