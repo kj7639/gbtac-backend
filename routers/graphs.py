@@ -12,7 +12,7 @@ Author: Dominique Anne Lee, Anna Yabut, Kiera Johnson
 from routers import *
 import pandas as pd
 import pyodbc
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException
 
 from helpers.forecasting import get_forecast
 from helpers.rate_limit import limiter
@@ -129,7 +129,7 @@ async def get_batch_data(
 
 
 @router.get("/data/{sensor_code}")
-@limiter.limit("60000/minute")
+@limiter.limit("30/minute")
 async def get_data(
     request: Request,
     sensor_code: str,
@@ -164,27 +164,27 @@ async def get_data(
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return JSONResponse(status_code=400, content={"error": "Invalid sensor code"})
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     san_start = validateDate(start)
     if san_start is False:
-        return JSONResponse(status_code=400, content={"error": "Invalid start date"})
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
     if san_end is False:
-        return JSONResponse(status_code=400, content={"error": "Invalid end date"})
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return JSONResponse(status_code=400, content={"error": "End date cannot be earlier than start date"})
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
     if agg not in ["none", "H", "D", "M", "Y"]:
-        return JSONResponse(status_code=400, content={"error": "Invalid aggregation interval"})
+        raise HTTPException(status_code=400, detail="Invalid aggregation interval")
 
     if type not in ["mean", "sum"]:
-        return JSONResponse(status_code=400, content={"error": "Invalid aggregation type"})
+        raise HTTPException(status_code=400, detail="Invalid aggregation type")
 
     column_name = f"{SENSOR_PRE}{san_code}"
 
@@ -289,11 +289,11 @@ async def get_name(
         _user: Authenticated user dependency.
 
     Returns:
-        Human-readable sensor name or an error message string if invalid.
+        Human-readable sensor name or an error code and message if invalid.
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return "enter valid sensor code"
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     name = replace_name(san_code)
     if name is not False:
@@ -310,7 +310,10 @@ async def get_name(
     curs.execute(query, (san_code,))
     rows = curs.fetchall()
 
-    res = rows[0][2] if rows != [] else "name not found"
+    if rows != []:
+        res = rows[0][2]  
+    else:
+        raise HTTPException(status_code=404, detail="Name not found")
 
     conn.close()
     return res

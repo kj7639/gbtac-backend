@@ -13,7 +13,7 @@ from helpers.names import replace_name
 from routers import *
 
 from fastapi.responses import StreamingResponse
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, Request, Depends, HTTPException
 
 import pyodbc
 import pandas as pd
@@ -55,7 +55,7 @@ async def generate_table_report(
 
     Returns:
         StreamingResponse containing a generated PDF report, or an error
-        message string if validation fails.
+        code and description if validation fails.
     """
 
     sensor_list = [s.strip() for s in sensors.split(",")]
@@ -65,25 +65,25 @@ async def generate_table_report(
     for sensor in sensor_list:
         san_code = validateCode(sensor)
         if san_code is False:
-            return f"enter valid sensor code: {sensor}"
+            raise HTTPException(status_code=400, detail=f"Invalid sensor code: ${sensor}")
         san_sensors.append(san_code)
 
     san_start = validateDate(start)
     if san_start is False:
-        return "invalid start date"
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
     if san_end is False:
-        return "invalid end date"
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return "end date cannot be earlier than start date"
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
     if agg not in ["none", "H", "D", "M", "Y"]:
-        return "invalid aggregation interval"
+        raise HTTPException(status_code=400, detail="Invalid aggregation interval")
 
     # Build sensor column list
     sens_str = ", ".join(f"{SENSOR_PRE}{sensor}" for sensor in san_sensors)

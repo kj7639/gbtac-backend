@@ -11,7 +11,7 @@ Author: Dominique Anne Lee
 from routers import *
 import pandas as pd
 import pyodbc
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException
 
 from helpers.rate_limit import limiter
 from fastapi import APIRouter, Request
@@ -52,27 +52,27 @@ async def guest_get_data(
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return JSONResponse(status_code=400, content={"error": "Invalid sensor code"})
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     san_start = validateDate(start)
     if san_start is False:
-        return JSONResponse(status_code=400, content={"error": "Invalid start date"})
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
     if san_end is False:
-        return JSONResponse(status_code=400, content={"error": "Invalid end date"})
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return JSONResponse(status_code=400, content={"error": "End date cannot be earlier than start date"})
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
     if agg not in ["none", "H", "D", "M", "Y"]:
-        return JSONResponse(status_code=400, content={"error": "Invalid aggregation interval"})
+        raise HTTPException(status_code=400, detail="Invalid aggregation interval")
 
     if type not in ["mean", "sum"]:
-        return JSONResponse(status_code=400, content={"error": "Invalid aggregation type"})
+        raise HTTPException(status_code=400, detail="Invalid aggregation type")
 
     column_name = f"{SENSOR_PRE}{san_code}"
 
@@ -151,7 +151,7 @@ async def guest_get_name(request: Request, sensor_code: str) -> str:
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return "enter valid sensor code"
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     name = replace_name(san_code)
     if name is not False:
