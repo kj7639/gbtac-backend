@@ -29,7 +29,10 @@ from helpers.auth_dependencies import (
     require_admin,
     get_current_user_from_session,
 )
-from helpers.email_service import send_reset_code_email
+from helpers.email_service import (
+    send_reset_code_email,
+    send_staff_account_created_email,
+)
 from helpers.firebase_admin_setup import get_firestore_client, get_firebase_auth
 from helpers.rate_limit import limiter
 
@@ -110,7 +113,7 @@ class AdminUpdateStaffRequest(BaseModel):
 MAX_FAILED_ATTEMPTS = 5
 RESET_COOLDOWN_SECONDS = 60
 SESSION_EXPIRES_SECONDS = 60 * 60 * 8
-IDLE_TIMEOUT_SECONDS = 10 * 60
+IDLE_TIMEOUT_SECONDS = 30 * 60
 HEARTBEAT_MIN_SECONDS = 60
 RESET_CODE_EXPIRES_MINUTES = 10
 RESET_MAX_VERIFY_ATTEMPTS = 5
@@ -483,8 +486,8 @@ def session_login(payload: TokenRequest, response: Response) -> dict[str, Any]:
         value=session_cookie,
         max_age=SESSION_EXPIRES_SECONDS,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=True,
+        samesite="none",
         path="/",
     )
 
@@ -546,7 +549,8 @@ def logout(
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path="/",
-        samesite="lax",
+        samesite="none",
+        secure=True,
     )
 
     return {
@@ -781,7 +785,22 @@ async def create_staff(
         if doc.exists:
             raise HTTPException(status_code=400, detail="Staff member with this email already exists")
 
+        firebase_user = None
+
+        try:
+            firebase_user = firebase_auth.get_user_by_email(email)
+            raise HTTPException(status_code=400, detail="A Firebase Auth user with this email already exists")
+        except HTTPException:
+            raise
+        except Exception:
+            firebase_user = firebase_auth.create_user(
+                email=email,
+                display_name=f"{payload.firstName} {payload.lastName}".strip(),
+                disabled=not payload.active,
+            )
+
         staff_data = {
+            "uid": firebase_user.uid,
             "email": email,
             "firstName": payload.firstName,
             "lastName": payload.lastName,
@@ -793,10 +812,22 @@ async def create_staff(
 
         doc_ref.set(staff_data)
 
+        try:
+            send_staff_account_created_email(email, payload.firstName)
+        except Exception as email_error:
+            print("CREATE STAFF EMAIL ERROR:", repr(email_error))
+            return {
+                "success": True,
+                "message": "Staff account created successfully, but the welcome email could not be sent.",
+                "email": email,
+                "emailSent": False
+            }
+
         return {
             "success": True,
-            "message": "Staff account created successfully",
-            "email": email
+            "message": "Staff account created successfully and setup instructions were emailed.",
+            "email": email,
+            "emailSent": True
         }
     except HTTPException:
         raise
@@ -863,7 +894,9 @@ async def admin_update_staff(
                 user = firebase_auth.get_user_by_email(original_email)
                 firebase_auth.update_user(
                     user.uid,
-                    email=new_email
+                    email=new_email,
+                    display_name=f"{payload.firstName} {payload.lastName}".strip(),
+                    disabled=not payload.active,
                 )
                 print(f"ADMIN UPDATE - Firebase Auth email updated from {original_email} to {new_email}")
             except Exception as auth_error:
@@ -895,6 +928,16 @@ async def admin_update_staff(
             }
 
             old_doc_ref.update(update_data)
+
+            try:
+                user = firebase_auth.get_user_by_email(original_email)
+                firebase_auth.update_user(
+                    user.uid,
+                    display_name=f"{payload.firstName} {payload.lastName}".strip(),
+                    disabled=not payload.active,
+                )
+            except Exception as auth_error:
+                print(f"ADMIN UPDATE - Firebase Auth error: {repr(auth_error)}")
 
             return {
                 "success": True,
@@ -995,6 +1038,14 @@ def request_password_reset(
     allowed_user = get_allowed_user_data(email)
     if not allowed_user:
         raise HTTPException(status_code=404, detail="No active account found for this email")
+
+    try:
+        firebase_auth.get_user_by_email(email)
+    except Exception:
+        raise HTTPException(
+            status_code=404,
+            detail="No authentication account found for this email"
+        )
 
     doc_ref = db.collection("passwordResetOtps").document(email)
     snap = doc_ref.get()
@@ -1254,8 +1305,8 @@ def refresh_session(
         value=session_cookie,
         max_age=SESSION_EXPIRES_SECONDS,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=True,
+        samesite="none",
         path="/",
     )
 
