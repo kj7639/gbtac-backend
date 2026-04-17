@@ -28,7 +28,7 @@ from reportlab.lib.units import inch
 router = APIRouter(prefix="/report")
 
 
-@router.get("", response_model=None)
+@router.get("/", response_model=None)
 async def generate_table_report(
     sensors: str,
     start: str,
@@ -134,9 +134,17 @@ async def generate_table_report(
     df["ts"] = pd.to_datetime(df["ts"])
 
     # Apply aggregation if requested
+    agg_freq_map = {
+        "H": "h",
+        "D": "D",
+        "M": "ME",
+        "Y": "YE",
+    }
+
     if agg != "none":
         df = df.set_index("ts")
-        df_agg = df.resample(agg.lower()).mean() if type == "mean" else df.resample(agg.lower()).sum()
+        freq = agg_freq_map[agg]
+        df_agg = df.resample(freq).mean() if type == "mean" else df.resample(freq).sum()
         res = df_agg.reset_index()
     else:
         res = df
