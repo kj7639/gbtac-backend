@@ -14,7 +14,7 @@ import pyodbc
 from routers import *
 from routers.natural_gas import load_natural_gas
 from helpers.rate_limit import limiter
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends
 from helpers.auth_dependencies import get_current_user_from_session
 
 router = APIRouter(prefix="/energy")
@@ -46,23 +46,24 @@ async def get_data(
     Raises:
         HTTPException: Not used directly; validation errors return messages.
     """
+    
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return "enter valid sensor code"
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     san_start = validateDate(start)
     if san_start is False:
-        return "invalid start date"
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
     if san_end is False:
-        return "invalid end date"
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return "end date cannot be earlier than start date"
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
     column_name = f"{SENSOR_PRE}{san_code}"
 
@@ -112,14 +113,14 @@ async def get_card_data(
     """
     san_start = validateDate(start)
     if san_start is False:
-        return "invalid start date"
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     san_end = validateDate(end)
     if san_end is False:
-        return "invalid end date"
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return "end date cannot be earlier than start date"
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
@@ -183,21 +184,21 @@ async def total_energy(
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return "enter valid sensor code"
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     san_start = validateDate(start)
     if san_start is False:
-        return "invalid start date"
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
     if san_end is False:
-        return "invalid end date"
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return "end date cannot be earlier than start date"
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
     column_name = f"{SENSOR_PRE}{san_code}"
 

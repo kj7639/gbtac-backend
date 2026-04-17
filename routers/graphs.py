@@ -12,6 +12,7 @@ Author: Dominique Anne Lee, Anna Yabut, Kiera Johnson
 from routers import *
 import pandas as pd
 import pyodbc
+from fastapi import HTTPException
 
 from helpers.forecasting import get_forecast
 from helpers.rate_limit import limiter
@@ -128,7 +129,7 @@ async def get_batch_data(
 
 
 @router.get("/data/{sensor_code}")
-@limiter.limit("60/minute")
+@limiter.limit("30/minute")
 async def get_data(
     request: Request,
     sensor_code: str,
@@ -137,7 +138,7 @@ async def get_data(
     agg: str = "none",
     type: str = "mean",
     _user=Depends(get_current_user_from_session)
-) -> list | str:
+) -> list | dict:
     """
     Retrieves time-series sensor data with optional aggregation and forecasting.
 
@@ -156,50 +157,79 @@ async def get_data(
 
     Returns:
         List of timestamped sensor readings or aggregated values. Returns
-        an error message string if validation fails.
+        an error code and message if fails
 
     Raises:
         HTTPException: Not used directly; validation errors return messages.
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return "enter valid sensor code"
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     san_start = validateDate(start)
     if san_start is False:
-        return "invalid start date"
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
     if san_end is False:
-        return "invalid end date"
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return "end date cannot be earlier than start date"
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
     if agg not in ["none", "H", "D", "M", "Y"]:
-        return "invalid aggregation interval"
+        raise HTTPException(status_code=400, detail="Invalid aggregation interval")
 
     if type not in ["mean", "sum"]:
-        return "invalid aggregation type"
+        raise HTTPException(status_code=400, detail="Invalid aggregation type")
 
     column_name = f"{SENSOR_PRE}{san_code}"
 
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
-    # Use direct datetime range comparison instead of CAST(ts AS DATE)
-    # so SQL Server can use an index on the ts column
-    query = f"""
-        SELECT ts, {column_name}
-        FROM GBTAC_data
-        WHERE {column_name} IS NOT NULL
-        AND ts >= ?
-        AND ts < DATEADD(day, 1, CAST(? AS datetime))
-        ORDER BY ts
-    """
+    agg_time = {
+        "none": "none",
+        "H": "hour",
+        "D": "day",
+        "M": "month",
+        "Y": "year"
+    }
+
+    agg_type = {
+        "mean": "AVG",
+        "sum": "SUM"
+    }
+
+    q_agg = agg_time.get(agg, "none")
+    q_type = agg_type.get(type, "AVG")
+
+    if(q_agg == "none"):
+        # Use direct datetime range comparison instead of CAST(ts AS DATE)
+        # so SQL Server can use an index on the ts column
+        query = f"""
+            SELECT ts as time, {column_name}
+            FROM GBTAC_data
+            WHERE {column_name} IS NOT NULL
+            AND ts >= ?
+            AND ts < DATEADD(day, 1, CAST(? AS datetime))
+            ORDER BY ts
+        """
+    else:
+        query = f"""
+            SELECT 
+                DATEADD({q_agg}, DATEDIFF({q_agg}, 0, ts), 0) as time,
+                {q_type}({column_name}) as data
+            FROM GBTAC_data
+            WHERE {column_name} IS NOT NULL
+            AND ts >= ?
+            AND ts < DATEADD(day, 1, CAST(? AS datetime))
+            GROUP BY DATEADD({q_agg}, DATEDIFF({q_agg}, 0, ts), 0)
+            ORDER BY time
+        """
 
     curs.execute(query, (san_start, san_end))
     rows = curs.fetchall()
@@ -214,28 +244,28 @@ async def get_data(
     # Append forecast data when requesting beyond available dataset
     if san_end > NEWEST:
         forecasted_data = get_forecast(san_code, NEWEST, san_end)
+        # Apply aggregation if requested - only to forecast data now
+        if agg != "none":
+            df = pd.DataFrame(forecasted_data)
+            df = df.dropna()
+            df["ts"] = pd.to_datetime(df["ts"])
+            df = df.set_index("ts")
+
+            freq_map = {
+                "H": "h",
+                "D": "D",
+                "M": "MS",
+                "Y": "YS",
+            }
+
+            freq = freq_map[agg]
+
+            df_agg = df.resample(freq).mean() if type == "mean" else df.resample(freq).sum()
+
+            df_agg = df_agg.astype(object).where(pd.notna(df_agg), other=None)
+            forecasted_data = df_agg.reset_index().to_dict(orient="records")
+
         res = res + forecasted_data
-
-    # Apply aggregation if requested
-    if agg != "none":
-        df = pd.DataFrame(res)
-        df = df.dropna()
-        df["ts"] = pd.to_datetime(df["ts"])
-        df = df.set_index("ts")
-
-        freq_map = {
-            "H": "h",
-            "D": "D",
-            "M": "MS",
-            "Y": "YS",
-        }
-
-        freq = freq_map[agg]
-
-        df_agg = df.resample(freq).mean() if type == "mean" else df.resample(freq).sum()
-
-        df_agg = df_agg.astype(object).where(pd.notna(df_agg), other=None)
-        res = df_agg.reset_index().to_dict(orient="records")
 
     return res
 
@@ -259,11 +289,11 @@ async def get_name(
         _user: Authenticated user dependency.
 
     Returns:
-        Human-readable sensor name or an error message string if invalid.
+        Human-readable sensor name or an error code and message if invalid.
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return "enter valid sensor code"
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     name = replace_name(san_code)
     if name is not False:
@@ -280,7 +310,10 @@ async def get_name(
     curs.execute(query, (san_code,))
     rows = curs.fetchall()
 
-    res = rows[0][2] if rows != [] else "name not found"
+    if rows != []:
+        res = rows[0][2]  
+    else:
+        raise HTTPException(status_code=404, detail="Name not found")
 
     conn.close()
     return res

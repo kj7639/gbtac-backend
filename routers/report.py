@@ -13,7 +13,7 @@ from helpers.names import replace_name
 from routers import *
 
 from fastapi.responses import StreamingResponse
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, Request, Depends, HTTPException
 
 import pyodbc
 import pandas as pd
@@ -28,7 +28,7 @@ from reportlab.lib.units import inch
 router = APIRouter(prefix="/report")
 
 
-@router.get("", response_model=None)
+@router.get("/", response_model=None)
 async def generate_table_report(
     sensors: str,
     start: str,
@@ -55,7 +55,7 @@ async def generate_table_report(
 
     Returns:
         StreamingResponse containing a generated PDF report, or an error
-        message string if validation fails.
+        code and description if validation fails.
     """
 
     sensor_list = [s.strip() for s in sensors.split(",")]
@@ -65,25 +65,25 @@ async def generate_table_report(
     for sensor in sensor_list:
         san_code = validateCode(sensor)
         if san_code is False:
-            return f"enter valid sensor code: {sensor}"
+            raise HTTPException(status_code=400, detail=f"Invalid sensor code: ${sensor}")
         san_sensors.append(san_code)
 
     san_start = validateDate(start)
     if san_start is False:
-        return "invalid start date"
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
     if san_end is False:
-        return "invalid end date"
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return "end date cannot be earlier than start date"
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
     if agg not in ["none", "H", "D", "M", "Y"]:
-        return "invalid aggregation interval"
+        raise HTTPException(status_code=400, detail="Invalid aggregation interval")
 
     # Build sensor column list
     sens_str = ", ".join(f"{SENSOR_PRE}{sensor}" for sensor in san_sensors)
@@ -134,9 +134,17 @@ async def generate_table_report(
     df["ts"] = pd.to_datetime(df["ts"])
 
     # Apply aggregation if requested
+    agg_freq_map = {
+        "H": "h",
+        "D": "D",
+        "M": "ME",
+        "Y": "YE",
+    }
+
     if agg != "none":
         df = df.set_index("ts")
-        df_agg = df.resample(agg.lower()).mean() if type == "mean" else df.resample(agg.lower()).sum()
+        freq = agg_freq_map[agg]
+        df_agg = df.resample(freq).mean() if type == "mean" else df.resample(freq).sum()
         res = df_agg.reset_index()
     else:
         res = df
@@ -163,33 +171,63 @@ async def generate_table_report(
     story.append(Paragraph(f"{san_start} to {san_end}", styles["Normal"]))
     story.append(Spacer(1, 16))
 
+    # Trim timestamp to match aggregation level
+    ts_formats = {
+        "none": "%Y-%m-%d %H:%M:%S",
+        "H":    "%Y-%m-%d %H:%M",
+        "D":    "%Y-%m-%d",
+        "M":    "%Y-%m",
+        "Y":    "%Y",
+    }
+    ts_fmt = ts_formats.get(agg, "%Y-%m-%d %H:%M:%S")
+
     display_df = res.copy()
-    display_df["ts"] = display_df["ts"].astype(str).str[:19]
+    display_df["ts"] = pd.to_datetime(display_df["ts"]).dt.strftime(ts_fmt)
 
     for col in san_sensors:
         display_df[col] = display_df[col].apply(
             lambda v: f"{v:,.4f}" if pd.notna(v) else "-"
         )
 
-    headers = ["Timestamp"] + names
-    table_data = [headers] + display_df.values.tolist()
+    # Scale font size and padding down as column count increases
+    num_cols = 1 + len(names)
+    if num_cols <= 4:
+        header_font, body_font = 13, 10
+        h_pad, b_pad = 8, 5
+    elif num_cols <= 7:
+        header_font, body_font = 10, 8
+        h_pad, b_pad = 5, 3
+    else:
+        header_font, body_font = 8, 7
+        h_pad, b_pad = 4, 2
 
     page_width = portrait(letter)[0] - inch
-    col_width = page_width / len(headers)
+    col_width = page_width / num_cols
 
-    table = Table(table_data, colWidths=[col_width] * len(headers), repeatRows=1)
+    # Use Paragraph objects for headers so long names wrap within the cell
+    # instead of overflowing. Plain strings in ReportLab tables never wrap.
+    header_style = styles["Normal"].clone("HeaderStyle")
+    header_style.textColor = colors.white
+    header_style.fontName = "Helvetica-Bold"
+    header_style.fontSize = header_font
+    header_style.leading = header_font + 2
+
+    headers = [Paragraph("Timestamp", header_style)] + [Paragraph(n, header_style) for n in names]
+    table_data = [headers] + display_df.values.tolist()
+
+    table = Table(table_data, colWidths=[col_width] * num_cols, repeatRows=1)
 
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DA291C")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 13),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-        ("TOPPADDING", (0, 0), (-1, 0), 8),
+        ("FONTSIZE", (0, 0), (-1, 0), header_font),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), h_pad),
+        ("TOPPADDING", (0, 0), (-1, 0), h_pad),
         ("ROWBACKGROUND", (0, 1), (-1, -1), colors.white),
-        ("FONTSIZE", (0, 1), (-1, -1), 10),
-        ("TOPPADDING", (0, 1), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 1), (-1, -1), 5),
+        ("FONTSIZE", (0, 1), (-1, -1), body_font),
+        ("TOPPADDING", (0, 1), (-1, -1), b_pad),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), b_pad),
         ("GRID", (0, 0), (-1, -1), 1.5, colors.black),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (1, 1), (-1, -1), "LEFT"),

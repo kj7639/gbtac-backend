@@ -11,6 +11,7 @@ Author: Dominique Anne Lee
 from routers import *
 import pandas as pd
 import pyodbc
+from fastapi import HTTPException
 
 from helpers.rate_limit import limiter
 from fastapi import APIRouter, Request
@@ -51,43 +52,72 @@ async def guest_get_data(
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return "enter valid sensor code"
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     san_start = validateDate(start)
     if san_start is False:
-        return "invalid start date"
+        raise HTTPException(status_code=400, detail="Invalid start date")
 
     if end == "":
         end = san_start
 
     san_end = validateDate(end)
     if san_end is False:
-        return "invalid end date"
+        raise HTTPException(status_code=400, detail="Invalid end date")
 
     if san_end < san_start:
-        return "end date cannot be earlier than start date"
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
 
-    allowed_agg = ["none", "H", "D", "M", "Y"]
-    if agg not in allowed_agg:
-        return "invalid aggregation interval"
+    if agg not in ["none", "H", "D", "M", "Y"]:
+        raise HTTPException(status_code=400, detail="Invalid aggregation interval")
 
-    allowed_type = ["mean", "sum"]
-    if type not in allowed_type:
-        return "invalid aggregation type"
+    if type not in ["mean", "sum"]:
+        raise HTTPException(status_code=400, detail="Invalid aggregation type")
 
     column_name = f"{SENSOR_PRE}{san_code}"
 
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
-    query = f"""
-        SELECT ts, {column_name}
-        FROM GBTAC_data
-        WHERE {column_name} IS NOT NULL
-        AND CAST(ts AS DATE) >= ?
-        AND CAST(ts AS DATE) <= ?
-        ORDER BY ts
-    """
+    agg_time = {
+        "none": "none",
+        "H": "hour",
+        "D": "day",
+        "M": "month",
+        "Y": "year"
+    }
+
+    agg_type = {
+        "mean": "AVG",
+        "sum": "SUM"
+    }
+
+    q_agg = agg_time.get(agg, "none")
+    q_type = agg_type.get(type, "AVG")
+
+    if(q_agg == "none"):
+        # Use direct datetime range comparison instead of CAST(ts AS DATE)
+        # so SQL Server can use an index on the ts column
+        query = f"""
+            SELECT ts as time, {column_name}
+            FROM GBTAC_data
+            WHERE {column_name} IS NOT NULL
+            AND ts >= ?
+            AND ts < DATEADD(day, 1, CAST(? AS datetime))
+            ORDER BY ts
+        """
+    else:
+        query = f"""
+            SELECT 
+                DATEADD({q_agg}, DATEDIFF({q_agg}, 0, ts), 0) as time,
+                {q_type}({column_name}) as data
+            FROM GBTAC_data
+            WHERE {column_name} IS NOT NULL
+            AND ts >= ?
+            AND ts < DATEADD(day, 1, CAST(? AS datetime))
+            GROUP BY DATEADD({q_agg}, DATEDIFF({q_agg}, 0, ts), 0)
+            ORDER BY time
+        """
 
     curs.execute(query, (san_start, san_end))
     rows = curs.fetchall()
@@ -98,23 +128,6 @@ async def guest_get_data(
 
     if res == []:
         return []
-
-    if agg != "none":
-        df = pd.DataFrame(res)
-        df = df.dropna()
-        df["ts"] = pd.to_datetime(df["ts"])
-        df = df.set_index("ts")
-
-        freq_map = {"H": "h", "D": "D", "M": "MS", "Y": "YS"}
-        freq = freq_map[agg]
-
-        if type == "mean":
-            df_agg = df.resample(freq).mean()
-        else:
-            df_agg = df.resample(freq).sum()
-
-        df_agg = df_agg.astype(object).where(pd.notna(df_agg), other=None)
-        res = df_agg.reset_index().to_dict(orient="records")
 
     return res
 
@@ -138,7 +151,7 @@ async def guest_get_name(request: Request, sensor_code: str) -> str:
     """
     san_code = validateCode(sensor_code)
     if san_code is False:
-        return "enter valid sensor code"
+        raise HTTPException(status_code=400, detail="Invalid sensor code")
 
     name = replace_name(san_code)
     if name is not False:
