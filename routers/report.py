@@ -91,13 +91,39 @@ async def generate_table_report(
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
-    query = f"""
-        SELECT ts, {sens_str}
-        FROM GBTAC_data
-        WHERE ({sens_str.replace(", ", " IS NOT NULL OR ")} IS NOT NULL)
-        AND (CAST(ts AS DATE) >= ? AND CAST(ts AS DATE) <= ?)
-        ORDER BY ts
-    """
+    letters = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]
+    coal = ""
+    values = ""
+    join = ""
+    count = 0
+    for code in san_sensors:
+        coal += f"{letters[count]}.ts, "
+        values += f"{letters[count]}.value AS {letters[count]}, "
+        if count != 0:
+            join += f" FULL OUTER JOIN {SENSOR_PRE}{code} AS {letters[count]} ON {letters[0]}.ts = {letters[count]}.ts"
+        count += 1
+
+    coal = coal[:-2]
+    values = values[:-2]
+
+    if len(san_sensors) == 1:
+        query = f"""
+            SELECT ts, value
+            FROM {SENSOR_PRE}{san_sensors[0]}
+            WHERE CAST(ts AS DATE) >= ?
+            AND CAST(ts AS DATE) < DATEADD(day, 1, CAST(? AS datetime))
+            ORDER BY ts
+        """
+    else:
+        query = f"""
+            SELECT COALESCE({coal}), {values}
+            FROM {SENSOR_PRE}{san_sensors[0]} AS {letters[0]}
+            {join}
+            WHERE COALESCE({coal}) >= ?
+            AND COALESCE({coal}) < DATEADD(day, 1, CAST(? AS datetime))
+            ORDER BY COALESCE({coal})
+        """
+    print(query)
 
     curs.execute(query, (san_start, san_end))
     rows = curs.fetchall()
@@ -109,6 +135,9 @@ async def generate_table_report(
             dataset[sensor] = row[i]
         res.append(dataset)
 
+    conn.close()
+    conn = pyodbc.connect(secondary_connection_str)
+    curs = conn.cursor()
     # Resolve sensor display names
     query = f"""
         SELECT sensor_name_source, sensor_name_report

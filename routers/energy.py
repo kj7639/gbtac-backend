@@ -71,8 +71,8 @@ async def get_data(
     curs = conn.cursor()
 
     query = f"""
-        SELECT SUM({column_name})
-        FROM GBTAC_data
+        SELECT SUM(value)
+        FROM {column_name}
         WHERE CAST(ts AS DATE) >= ?
         AND CAST(ts AS DATE) <= ?
     """
@@ -127,18 +127,30 @@ async def get_card_data(
 
     query = """
         SELECT 
-            AVG(SaitSolarLab_30000_TL340) AS "Average Generation",
-            MAX(SaitSolarLab_30000_TL340) AS "Maximum Generation",
-            MIN(SaitSolarLab_30000_TL340) AS "Minimum Generation",
-            AVG(SaitSolarLab_30000_TL341) AS "Average Consumption",
-            MAX(SaitSolarLab_30000_TL341) AS "Maximum Consumption",
-            MIN(SaitSolarLab_30000_TL341) AS "Minimum Consumption"
-        FROM GBTAC_data
-        WHERE CAST(ts AS DATE) >= ?
-        AND CAST(ts AS DATE) <= ?
+            t1.avg_value  AS "Average Generation",
+            t1.max_value  AS "Maximum Generation",
+            t1.min_value  AS "Minimum Generation",
+            t2.avg_value  AS "Average Consumption",
+            t2.max_value  AS "Maximum Consumption",
+            t2.min_value  AS "Minimum Consumption"
+        FROM 
+            (SELECT 
+                AVG(value) AS avg_value,
+                MAX(value) AS max_value,
+                MIN(value) AS min_value
+            FROM SaitSolarLab_30000_TL340
+            WHERE CAST(ts AS DATE) BETWEEN ? AND ?
+            ) t1,
+            (SELECT 
+                AVG(value) AS avg_value,
+                MAX(value) AS max_value,
+                MIN(value) AS min_value
+            FROM SaitSolarLab_30000_TL341
+            WHERE CAST(ts AS DATE) BETWEEN ? AND ?
+            ) t2
     """
 
-    curs.execute(query, (san_start, san_end))
+    curs.execute(query, (san_start, san_end, san_start, san_end))
     columns = [column[0] for column in curs.description]
     rows = curs.fetchall()
 

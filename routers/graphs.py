@@ -88,12 +88,28 @@ async def get_batch_data(
     conn = pyodbc.connect(connection_str)
     curs = conn.cursor()
 
+    letters = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]
+    coal = ""
+    values = ""
+    join = ""
+    count = 0
+    for code in validated:
+        coal += f"{letters[count]}.ts, "
+        values += f"{letters[count]}.value AS {letters[count]}, "
+        if count != 0:
+            join += f" FULL OUTER JOIN {SENSOR_PRE}{code} AS {letters[count]} ON {letters[0]}.ts = {letters[count]}.ts"
+        count += 1
+
+    coal = coal[:-2]
+    values = values[:-2]
+
     query = f"""
-        SELECT ts, {col_select}
-        FROM GBTAC_data
-        WHERE ts >= ?
-        AND ts < DATEADD(day, 1, CAST(? AS datetime))
-        ORDER BY ts
+        SELECT COALESCE({coal}), {values}
+        FROM {SENSOR_PRE}{validated[0]} AS {letters[0]}
+        {join}
+        WHERE COALESCE({coal}) >= ?
+        AND COALESCE({coal}) < DATEADD(day, 1, CAST(? AS datetime))
+        ORDER BY COALESCE({coal})
     """
 
     curs.execute(query, (san_start, san_end))
@@ -211,10 +227,9 @@ async def get_data(
         # Use direct datetime range comparison instead of CAST(ts AS DATE)
         # so SQL Server can use an index on the ts column
         query = f"""
-            SELECT ts as time, {column_name}
-            FROM GBTAC_data
-            WHERE {column_name} IS NOT NULL
-            AND ts >= ?
+            SELECT ts as time, value
+            FROM {column_name}
+            WHERE ts >= ?
             AND ts < DATEADD(day, 1, CAST(? AS datetime))
             ORDER BY ts
         """
@@ -222,10 +237,9 @@ async def get_data(
         query = f"""
             SELECT 
                 DATEADD({q_agg}, DATEDIFF({q_agg}, 0, ts), 0) as time,
-                {q_type}({column_name}) as data
-            FROM GBTAC_data
-            WHERE {column_name} IS NOT NULL
-            AND ts >= ?
+                {q_type}(value) as data
+            FROM {column_name}
+            WHERE ts >= ?
             AND ts < DATEADD(day, 1, CAST(? AS datetime))
             GROUP BY DATEADD({q_agg}, DATEDIFF({q_agg}, 0, ts), 0)
             ORDER BY time
@@ -269,6 +283,82 @@ async def get_data(
 
     return res
 
+@router.get("/data/opt/{sensor_code}")
+@limiter.limit("30/minute")
+async def get_data_opt(
+    request: Request,
+    sensors: str,
+    start: str = NEWEST,
+    end: str = "",
+    agg: str = "none",
+    type: str = "mean",
+    # _user=Depends(get_current_user_from_session)
+# ) -> list | dict:
+):
+    
+    sensor_list = [s.strip() for s in sensors.split(",")]
+    san_sensors = []
+
+    # --- VALIDATION / SANITIZATION ---
+    for sensor in sensor_list:
+        san_code = validateCode(sensor)
+        if san_code is False:
+            raise HTTPException(status_code=400, detail=f"Invalid sensor code: ${sensor}")
+        san_sensors.append(san_code)
+
+    san_start = validateDate(start)
+    if san_start is False:
+        raise HTTPException(status_code=400, detail="Invalid start date")
+
+    if end == "":
+        end = san_start
+
+    san_end = validateDate(end)
+    if san_end is False:
+        raise HTTPException(status_code=400, detail="Invalid end date")
+
+    if san_end < san_start:
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than start date")
+
+    if agg not in ["none", "H", "D", "M", "Y"]:
+        raise HTTPException(status_code=400, detail="Invalid aggregation interval")
+
+    if type not in ["mean", "sum"]:
+        raise HTTPException(status_code=400, detail="Invalid aggregation type")
+
+    # --- DATABASE STUFF ---
+    conn = pyodbc.connect(connection_str)
+    curs = conn.cursor()
+
+    # column_name = f"{SENSOR_PRE}{san_code}"
+    letters = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]
+    coal = ""
+    values = ""
+    join = ""
+    count = 0
+    for code in san_sensors:
+        coal += f"{letters[count]}.ts, "
+        values += f"{letters[count]}.value AS {letters[count]}, "
+        if count != 0:
+            join += f"FULL OUTER JOIN {SENSOR_PRE}{code} AS {letters[count]} ON {letters[0]}.ts = {letters[count]}.ts"
+        count += 1
+
+    coal = coal[:-2]
+    values = values[:-2]
+
+    query = f"""
+        SELECT COALESCE({coal}), {values}
+        FROM {SENSOR_PRE}{san_sensors[0]} AS {letters[0]}
+        {join}
+        ORDER BY COALESCE({coal})
+    """
+    print(query)
+    curs.execute(query)
+    rows = curs.fetchall()
+    print(rows)
+
+    # return res
+    return query
 
 @router.get("/name/{sensor_code}")
 @limiter.limit("30/minute")
@@ -299,7 +389,7 @@ async def get_name(
     if name is not False:
         return name
 
-    conn = pyodbc.connect(connection_str)
+    conn = pyodbc.connect(secondary_connection_str)
     curs = conn.cursor()
 
     query = """
@@ -337,7 +427,7 @@ async def get_codesnames(
     Returns:
         List of dictionaries containing sensor codes and display names.
     """
-    conn = pyodbc.connect(connection_str)
+    conn = pyodbc.connect(secondary_connection_str)
     curs = conn.cursor()
 
     query = """
