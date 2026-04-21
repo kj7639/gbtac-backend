@@ -136,28 +136,11 @@ async def generate_table_report(
         res.append(dataset)
 
     conn.close()
-    conn = pyodbc.connect(secondary_connection_str)
-    curs = conn.cursor()
-    # Resolve sensor display names
-    query = f"""
-        SELECT sensor_name_source, sensor_name_report
-        FROM sensor_names
-        WHERE sensor_name_source IN ({', '.join('?' for _ in san_sensors)})
-    """
-
-    curs.execute(query, san_sensors)
-    rows = curs.fetchall()
-
-    name_map = {}
-    for row in rows:
-        name = replace_name(row[0])
-        if name is False:
-            name = row[1]
-        name_map[row[0]] = name
-
-    names = [name_map[sensor] for sensor in san_sensors]
-
-    conn.close()
+    
+    names = []
+    for sensor in san_sensors:
+        name = SENSOR_PRE + sensor
+        names.append(name)
 
     df = pd.DataFrame(res, columns=["ts"] + san_sensors)
     df["ts"] = pd.to_datetime(df["ts"])

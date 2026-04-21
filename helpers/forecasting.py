@@ -17,6 +17,7 @@ import pandas as pd
 from prophet import Prophet
 import pyodbc
 from config import connection_str
+from routers import SENSOR_PRE
 
 NEWEST = str_to_date(get_newest())
 OLDEST = str_to_date(get_oldest())
@@ -114,9 +115,8 @@ def forecast(sensor_code: str) -> None:
     curs = conn.cursor()
 
     query = f"""
-        SELECT ts, SaitSolarLab_{sensor_code}
-        FROM GBTAC_data 
-        WHERE SaitSolarLab_{sensor_code} IS NOT NULL
+        SELECT ts as time, value
+        FROM {SENSOR_PRE}{sensor_code}
         ORDER BY ts
     """
 

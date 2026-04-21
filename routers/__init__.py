@@ -10,7 +10,7 @@ Author: Dominique Anne Lee
 
 from fastapi import APIRouter
 import pyodbc
-from config import connection_str, secondary_connection_str
+from config import connection_str
 from helpers.validation import validateDate, validateCode
 from helpers.dates import get_oldest, get_newest, str_to_date, date_to_str
 

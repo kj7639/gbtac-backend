@@ -19,7 +19,5 @@ load_dotenv(dotenv_path=env_path)
 server = os.getenv("SERVER")
 database = os.getenv("DATABASE")
 driver = os.getenv("DRIVER")
-database_name = os.getenv("NAME_DATABASE")
 
 connection_str = f'DRIVER={driver};SERVER={server};DATABASE={database};Trusted_Connection=Yes;Encrypt=no;'
-secondary_connection_str = f'DRIVER={driver};SERVER={server};DATABASE={database_name};Trusted_Connection=Yes;Encrypt=no;'
