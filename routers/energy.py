@@ -234,10 +234,9 @@ async def total_energy(
     query = f"""
         SELECT 
             FORMAT(ts, 'yyyy-MM') AS month,
-            SUM(ABS(CAST({column_name} AS FLOAT)) / 12000.0) AS electricity_kwh
-        FROM GBTAC_data
-        WHERE {column_name} IS NOT NULL
-        AND CAST(ts AS DATE) >= ?
+            SUM(ABS(CAST(value AS FLOAT)) / 12000.0) AS electricity_kwh
+        FROM {column_name}
+        WHERE CAST(ts AS DATE) >= ?
         AND CAST(ts AS DATE) <= ?
         GROUP BY FORMAT(ts, 'yyyy-MM')
         ORDER BY month
